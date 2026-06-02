@@ -228,8 +228,6 @@ class ArchiveClient:
         suffix = normalized[query_split.start() :] if query_split else ""
         if "*" in prefix:
             return normalized
-        if suffix:
-            return normalized
 
         stripped = re.sub(r"^https?://", "", prefix, flags=re.IGNORECASE)
         host_and_rest = re.split(r"[?#]", stripped, maxsplit=1)[0]

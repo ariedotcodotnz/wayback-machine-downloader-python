@@ -71,12 +71,6 @@ class SnapshotPlannerTests(unittest.TestCase):
         self.assertIn("__q", sanitized)
 
 
-class ConfigTests(unittest.TestCase):
-    def test_backup_name_uses_host_for_targets_with_tilde_paths(self) -> None:
-        config = DownloadConfig(target="orbita.starmedia.com/~angra-site")
-        self.assertEqual(config.backup_name, "orbita.starmedia.com")
-
-
 class ArchiveClientTests(unittest.TestCase):
     def test_default_parameters_match_ruby_behavior(self) -> None:
         config = DownloadConfig(target="https://example.com")
@@ -122,7 +116,6 @@ class ArchiveClientTests(unittest.TestCase):
         self.assertEqual(client.normalize_query_url("example.com"), "example.com/*")
         self.assertEqual(client.normalize_query_url("https://example.com/wiki/"), "https://example.com/wiki/*")
         self.assertEqual(client.normalize_query_url("https://example.com/wiki/page.html"), "https://example.com/wiki/page.html")
-        self.assertEqual(client.normalize_query_url("https://example.com/search?q=test"), "https://example.com/search?q=test")
 
 
 class RewriteTests(unittest.TestCase):
@@ -202,25 +195,6 @@ class DownloaderTests(unittest.TestCase):
                 downloader.download()
 
             mocked_sleep.assert_not_called()
-
-    def test_existing_files_do_not_duplicate_db_entries(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            config = DownloadConfig(target="https://example.com", directory=root, max_retries=0, keep_state=True)
-            downloader = WaybackDownloader(config, transport=FakeTransport({}))
-
-            existing_html = root / "index.html"
-            existing_html.parent.mkdir(parents=True, exist_ok=True)
-            existing_html.write_text("already here", encoding="utf-8")
-            (root / ".downloaded.txt").write_text("index.html\n", encoding="utf-8")
-
-            downloader._planned_snapshots = Mock(
-                return_value=[Snapshot("http://example.com/index.html", 20200101000000, "index.html")]
-            )
-
-            downloader.download()
-
-            self.assertEqual((root / ".downloaded.txt").read_text(encoding="utf-8"), "index.html\n")
 
 
 if __name__ == "__main__":

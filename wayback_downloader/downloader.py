@@ -51,7 +51,6 @@ class WaybackDownloader:
         self.planner = SnapshotPlanner(self.filters, self.mapper)
         self.rewriter = LocalLinkRewriter()
         self._session_downloaded_ids: set[str] = set()
-        self._persisted_downloaded_ids: set[str] = set()
         self._session_lock = threading.Lock()
         self._print_lock = threading.Lock()
         self._progress = _Progress()
@@ -93,7 +92,6 @@ class WaybackDownloader:
             )
 
         downloaded_ids = self.state.load_downloaded_ids(self.mapper)
-        self._persisted_downloaded_ids = set(downloaded_ids)
         self._session_downloaded_ids = set(downloaded_ids)
         remaining = [snapshot for snapshot in planned_snapshots if snapshot.file_id not in downloaded_ids]
         skipped_existing = len(planned_snapshots) - len(remaining)
@@ -171,7 +169,7 @@ class WaybackDownloader:
 
         local_path = self.mapper.local_path_for(snapshot.file_id, snapshot.original_url)
         if local_path.exists():
-            self._record_downloaded_id(snapshot.file_id)
+            self.state.append_downloaded_id(snapshot.file_id)
             self._mark_completed("EXISTS", snapshot.original_url)
             if self.config.page_requisites and local_path.suffix.lower() in self.HTML_SUFFIXES:
                 self._process_page_requisites(local_path, snapshot, job_queue)
@@ -188,7 +186,7 @@ class WaybackDownloader:
             if self.config.rewrite_to_local and local_path.suffix.lower() in LocalLinkRewriter.REWRITE_SUFFIXES:
                 self.rewriter.rewrite_file(local_path, self.layout.backup_path)
 
-            self._record_downloaded_id(snapshot.file_id)
+            self.state.append_downloaded_id(snapshot.file_id)
             self._mark_completed("SAVED", snapshot.original_url)
 
             if self.config.page_requisites and local_path.suffix.lower() in self.HTML_SUFFIXES:
@@ -343,15 +341,6 @@ class WaybackDownloader:
             if error:
                 message = f"{message} {error}"
             self.logger.info(message)
-
-    def _record_downloaded_id(self, file_id: str) -> None:
-        """Persist a successful file ID only once per downloader session."""
-
-        with self._session_lock:
-            if file_id in self._persisted_downloaded_ids:
-                return
-            self._persisted_downloaded_ids.add(file_id)
-        self.state.append_downloaded_id(file_id)
 
     def _existing_html_requisite_jobs(self, planned_snapshots: list[Snapshot], downloaded_ids: set[str]) -> list[Snapshot]:
         """Seed page-requisite discovery from already-downloaded HTML files.
