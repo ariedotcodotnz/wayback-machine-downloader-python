@@ -50,6 +50,11 @@ def sanitize_reference_path(raw: str, *, filesystem_safe: bool = False) -> str:
     normalized = re.sub(r"/+", "/", _apply_query_digest(path_part, query_part)).lstrip("/")
     segments: list[str] = []
     for segment in normalized.split("/"):
+        # Skip empty segments (e.g. from a trailing slash) so they don't get
+        # promoted to "_" by the all-invalid-chars fallback below; trailing
+        # slashes are a directory indicator, not a real path component.
+        if not segment:
+            continue
         cleaned = _sanitize_identifier_segment(segment)
         if filesystem_safe:
             cleaned = _filesystem_safe_segment(cleaned)

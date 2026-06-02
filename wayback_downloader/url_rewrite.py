@@ -10,22 +10,92 @@ from .paths import sanitize_reference_path
 from .text import decode_with_candidates
 
 
+# Collection patterns mirror the substitution patterns below but additionally
+# capture the host so the caller can reconstruct the original URL. They are
+# defined alongside the substitution regexes so future edits to one side are
+# obviously paired with the other.
+_COLLECT_HTML_WAYBACK = re.compile(
+    r"""\s(?:href|src|action|data-src|data-url)=["']https?://web\.archive\.org/web/\d+(?:id_)?/(?:https?:)?//([^/]+)([^"']*)["']""",
+    re.IGNORECASE,
+)
+_COLLECT_HTML_STD = re.compile(
+    r"""\s(?:href|src|action|data-src|data-url)=["'](?:https?:)?//([^/]+)([^"']*)["']""",
+    re.IGNORECASE,
+)
+_COLLECT_CSS_WAYBACK = re.compile(
+    r"""url\(\s*["']?https?://web\.archive\.org/web/\d+(?:id_)?/(?:https?:)?//([^/]+)([^"')]*?)["']?\s*\)""",
+    re.IGNORECASE,
+)
+_COLLECT_CSS_STD = re.compile(
+    r"""url\(\s*["']?(?:https?:)?//([^/]+)([^"')]*?)["']?\s*\)""",
+    re.IGNORECASE,
+)
+_COLLECT_JS_WAYBACK = re.compile(
+    r"""["']https?://web\.archive\.org/web/\d+(?:id_)?/(?:https?:)?//([^/]+)([^"']*)["']""",
+    re.IGNORECASE,
+)
+_COLLECT_JS_STD = re.compile(
+    r"""["'](?:https?:)?//([^/]+)([^"']*)["']""",
+    re.IGNORECASE,
+)
+_COLLECT_JSON_WAYBACK = re.compile(
+    r"""["']https?:\\/\\/web\.archive\.org\\/web\\/\d+(?:id_)?\\/(?:https?:)?\\/\\/([^\\"']+)((?:\\/[^"']*?)?)["']""",
+    re.IGNORECASE,
+)
+_COLLECT_JSON_STD = re.compile(
+    r"""["'](?:https?:)?\\/\\/([^\\"']+)((?:\\/[^"']*?)?)["']""",
+    re.IGNORECASE,
+)
+
+
+def _harvest(pattern: re.Pattern[str], content: str, collected: list[str], *, json_escaped: bool = False) -> None:
+    """Walk ``pattern`` and append a canonical ``https://host/path`` for each hit."""
+
+    for match in pattern.finditer(content):
+        host = match.group(1)
+        path = match.group(2)
+        if json_escaped:
+            # JSON-escaped captures still have the ``\/`` form embedded in the
+            # path; unescape so the URL we hand back to the downloader is the
+            # same as the one we'd build from any other syntactic variant.
+            path = path.replace("\\/", "/")
+        collected.append(f"https://{host}{path}")
+
+
 class LocalLinkRewriter:
     SERVER_SIDE_EXTS = {".php", ".asp", ".aspx", ".jsp", ".cgi", ".pl", ".py"}
     REWRITE_SUFFIXES = {".html", ".htm", ".css", ".js", ".php", ".asp", ".aspx", ".jsp"}
 
-    def rewrite_tree(self, root: Path, concurrency: int) -> int:
-        """Rewrite every supported file under ``root`` for local browsing."""
+    def rewrite_tree(self, root: Path, concurrency: int, *, collected_urls: list[str] | None = None) -> int:
+        """Rewrite every supported file under ``root`` for local browsing.
+
+        When ``collected_urls`` is provided, every original absolute URL the
+        rewriter touched is appended to it. The caller can use this to ensure
+        each rewritten link actually has a local file behind it (downloading
+        the missing ones from the archive).
+        """
 
         files = [path for path in root.rglob("*") if path.suffix.lower() in self.REWRITE_SUFFIXES]
         if not files:
             return 0
         if concurrency <= 1:
-            return sum(1 for path in files if self.rewrite_file(path, root))
-        with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            return sum(executor.map(lambda path: 1 if self.rewrite_file(path, root) else 0, files))
+            return sum(1 for path in files if self.rewrite_file(path, root, collected_urls=collected_urls))
 
-    def rewrite_file(self, file_path: Path, site_root: Path) -> bool:
+        # In threaded mode each worker collects into its own list to avoid
+        # racing on the shared one; we merge at the end.
+        def process(path: Path) -> tuple[int, list[str]]:
+            local_bucket: list[str] | None = [] if collected_urls is not None else None
+            changed = self.rewrite_file(path, root, collected_urls=local_bucket)
+            return (1 if changed else 0, local_bucket or [])
+
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            results = list(executor.map(process, files))
+        if collected_urls is not None:
+            for _, bucket in results:
+                collected_urls.extend(bucket)
+        return sum(count for count, _ in results)
+
+    def rewrite_file(self, file_path: Path, site_root: Path, *, collected_urls: list[str] | None = None) -> bool:
         """Rewrite archived/absolute URLs in a downloaded file to local paths."""
 
         raw = file_path.read_bytes()
@@ -33,9 +103,10 @@ class LocalLinkRewriter:
         content, encoding = decode_with_candidates(raw, preferred_encoding)
         original = content
 
-        content = self.rewrite_html_attribute_urls(content)
-        content = self.rewrite_css_urls(content)
-        content = self.rewrite_js_urls(content)
+        content = self.rewrite_html_attribute_urls(content, collected_urls=collected_urls)
+        content = self.rewrite_css_urls(content, collected_urls=collected_urls)
+        content = self.rewrite_js_urls(content, collected_urls=collected_urls)
+        content = self.rewrite_json_escaped_urls(content, collected_urls=collected_urls)
 
         root_prefix = self.site_root_relative_prefix(file_path, site_root)
         content = re.sub(
@@ -92,51 +163,100 @@ class LocalLinkRewriter:
                 rewritten += 1
         return rewritten
 
-    def rewrite_html_attribute_urls(self, content: str) -> str:
+    def rewrite_html_attribute_urls(self, content: str, *, collected_urls: list[str] | None = None) -> str:
         # Rewrite Wayback-hosted URLs first so we preserve the original path.
+        if collected_urls is not None:
+            _harvest(_COLLECT_HTML_WAYBACK, content, collected_urls)
         content = re.sub(
-            r"""(\s(?:href|src|action|data-src|data-url)=["'])https?://web\.archive\.org/web/\d+(?:id_)?/https?://[^/]+([^"']*)(["'])""",
+            r"""(\s(?:href|src|action|data-src|data-url)=["'])https?://web\.archive\.org/web/\d+(?:id_)?/(?:https?:)?//[^/]+([^"']*)(["'])""",
             lambda match: f"{match.group(1)}{self.normalize_path_for_local(match.group(2))}{match.group(3)}",
             content,
             flags=re.IGNORECASE,
         )
-        # Then rewrite regular absolute same/off-site links into local paths.
+        # Then rewrite regular absolute (https://, http://) and protocol-relative
+        # (//host/path) links into local paths.
+        if collected_urls is not None:
+            _harvest(_COLLECT_HTML_STD, content, collected_urls)
         return re.sub(
-            r"""(\s(?:href|src|action|data-src|data-url)=["'])https?://[^/]+([^"']*)(["'])""",
+            r"""(\s(?:href|src|action|data-src|data-url)=["'])(?:https?:)?//[^/]+([^"']*)(["'])""",
             lambda match: f"{match.group(1)}{self.normalize_path_for_local(match.group(2))}{match.group(3)}",
             content,
             flags=re.IGNORECASE,
         )
 
-    def rewrite_css_urls(self, content: str) -> str:
+    def rewrite_css_urls(self, content: str, *, collected_urls: list[str] | None = None) -> str:
         # CSS url(...) references appear in archived HTML and in standalone CSS.
+        if collected_urls is not None:
+            _harvest(_COLLECT_CSS_WAYBACK, content, collected_urls)
         content = re.sub(
-            r"""url\(\s*["']?https?://web\.archive\.org/web/\d+(?:id_)?/https?://[^/]+([^"')]*?)["']?\s*\)""",
+            r"""url\(\s*["']?https?://web\.archive\.org/web/\d+(?:id_)?/(?:https?:)?//[^/]+([^"')]*?)["']?\s*\)""",
             lambda match: f'url("{self.normalize_path_for_local(match.group(1))}")',
             content,
             flags=re.IGNORECASE,
         )
+        if collected_urls is not None:
+            _harvest(_COLLECT_CSS_STD, content, collected_urls)
         return re.sub(
-            r"""url\(\s*["']?https?://[^/]+([^"')]*?)["']?\s*\)""",
+            r"""url\(\s*["']?(?:https?:)?//[^/]+([^"')]*?)["']?\s*\)""",
             lambda match: f'url("{self.normalize_path_for_local(match.group(1))}")',
             content,
             flags=re.IGNORECASE,
         )
 
-    def rewrite_js_urls(self, content: str) -> str:
+    def rewrite_js_urls(self, content: str, *, collected_urls: list[str] | None = None) -> str:
         # JavaScript string literals often embed full absolute URLs.
+        if collected_urls is not None:
+            _harvest(_COLLECT_JS_WAYBACK, content, collected_urls)
         content = re.sub(
-            r"""(["'])https?://web\.archive\.org/web/\d+(?:id_)?/https?://[^/]+([^"']*)(["'])""",
+            r"""(["'])https?://web\.archive\.org/web/\d+(?:id_)?/(?:https?:)?//[^/]+([^"']*)(["'])""",
             lambda match: f"{match.group(1)}{self.normalize_path_for_local(match.group(2))}{match.group(3)}",
             content,
             flags=re.IGNORECASE,
         )
+        if collected_urls is not None:
+            _harvest(_COLLECT_JS_STD, content, collected_urls)
         return re.sub(
-            r"""(["'])https?://[^/]+([^"']*)(["'])""",
+            r"""(["'])(?:https?:)?//[^/]+([^"']*)(["'])""",
             lambda match: f"{match.group(1)}{self.normalize_path_for_local(match.group(2))}{match.group(3)}",
             content,
             flags=re.IGNORECASE,
         )
+
+    def rewrite_json_escaped_urls(self, content: str, *, collected_urls: list[str] | None = None) -> str:
+        """Rewrite JSON-escaped URLs (``https:\\/\\/host\\/path``).
+
+        WordPress and similar CMSes serialize URLs into inline ``<script>``
+        blocks as JSON, which escapes every forward slash. The standard JS
+        pass only matches literal ``//``, so these references would otherwise
+        survive and force the locally-served page to call out to the live
+        host. We preserve the source's escape style by un-escaping the path
+        for normalization and re-escaping the slashes in the substitution, so
+        the surrounding JSON stays well-formed.
+        """
+
+        # Wayback-wrapped variant first so we recover the underlying path.
+        if collected_urls is not None:
+            _harvest(_COLLECT_JSON_WAYBACK, content, collected_urls, json_escaped=True)
+        content = re.sub(
+            r"""(["'])https?:\\/\\/web\.archive\.org\\/web\\/\d+(?:id_)?\\/(?:https?:)?\\/\\/[^\\"']+((?:\\/[^"']*?)?)(["'])""",
+            self._rewrite_json_escaped_match,
+            content,
+            flags=re.IGNORECASE,
+        )
+        if collected_urls is not None:
+            _harvest(_COLLECT_JSON_STD, content, collected_urls, json_escaped=True)
+        return re.sub(
+            r"""(["'])(?:https?:)?\\/\\/[^\\"']+((?:\\/[^"']*?)?)(["'])""",
+            self._rewrite_json_escaped_match,
+            content,
+            flags=re.IGNORECASE,
+        )
+
+    def _rewrite_json_escaped_match(self, match: re.Match) -> str:
+        unescaped_path = match.group(2).replace("\\/", "/")
+        local_path = self.normalize_path_for_local(unescaped_path)
+        escaped_local_path = local_path.replace("/", "\\/")
+        return f"{match.group(1)}{escaped_local_path}{match.group(3)}"
 
     def normalize_path_for_local(self, path: str) -> str:
         """Convert an archived absolute path into the downloaded local path.

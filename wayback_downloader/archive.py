@@ -79,7 +79,14 @@ class ArchiveClient:
                     return [(int(timestamp), str(url)) for timestamp, url in parsed]
                 if response.status in {429, 500, 502, 503, 504}:
                     raise RuntimeError(f"Wayback CDX API error {response.status}: {response.reason}")
-                self.logger.warning("Unexpected CDX response %s for %s", response.status, normalized_target)
+                # The CDX API answers HTTP 400 once you page past the end of
+                # the dataset, so on later pages it's the normal "stop
+                # paginating" signal rather than an error worth alarming the
+                # user about.
+                if response.status == 400 and page_index and page_index > 0:
+                    self.logger.debug("CDX pagination exhausted for %s at page %s", normalized_target, page_index)
+                else:
+                    self.logger.warning("Unexpected CDX response %s for %s", response.status, normalized_target)
                 return []
             except Exception as exc:
                 if retries >= self.config.max_retries:

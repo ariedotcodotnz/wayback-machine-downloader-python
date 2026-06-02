@@ -55,6 +55,10 @@ class WaybackDownloader:
         self._print_lock = threading.Lock()
         self._progress = _Progress()
         self._failures: list[FailedDownload] = []
+        # Built lazily from the site-wide CDX listing so page-requisite assets
+        # can resolve their nearest archived timestamp without making one CDX
+        # request per asset (the original behavior swamped the API).
+        self._asset_snapshot_index: dict[str, list[int]] | None = None
 
         if self.config.reset:
             self.state.reset()
@@ -183,14 +187,28 @@ class WaybackDownloader:
                 return True
 
             local_path.write_bytes(result.body or b"")
+
+            # When rewriting and page-requisites are both on, ask the rewriter
+            # to report every absolute URL it touched. The page-requisites
+            # extractor only scans HTML href/src; the rewriter also catches
+            # URLs in JS string literals and JSON-escaped script blocks. Those
+            # additional URLs feed the same download queue so the rewritten
+            # local paths actually have files behind them.
+            collected_urls: list[str] | None = None
             if self.config.rewrite_to_local and local_path.suffix.lower() in LocalLinkRewriter.REWRITE_SUFFIXES:
-                self.rewriter.rewrite_file(local_path, self.layout.backup_path)
+                if self.config.page_requisites:
+                    collected_urls = []
+                self.rewriter.rewrite_file(local_path, self.layout.backup_path, collected_urls=collected_urls)
 
             self.state.append_downloaded_id(snapshot.file_id)
             self._mark_completed("SAVED", snapshot.original_url)
 
             if self.config.page_requisites and local_path.suffix.lower() in self.HTML_SUFFIXES:
                 self._process_page_requisites(local_path, snapshot, job_queue)
+
+            if collected_urls:
+                for collected_url in collected_urls:
+                    self._queue_asset_for_url(collected_url, snapshot.timestamp, job_queue)
             return True
         except Exception as exc:
             if local_path.exists() and local_path.stat().st_size == 0:
@@ -225,11 +243,14 @@ class WaybackDownloader:
             try:
                 resolved = urljoin(parent_url, asset_reference)
                 parsed = urlsplit(resolved)
-                asset_timestamp = parent_snapshot.timestamp
+                hint_timestamp = parent_snapshot.timestamp
 
                 wayback_match = self._WAYBACK_EMBED_RE.match(parsed.path)
                 if wayback_match:
-                    asset_timestamp = int(wayback_match.group(1))
+                    # Reference is already a /web/{ts}/url embed; prefer its
+                    # timestamp as the hint so we hit the same capture the
+                    # original page linked to.
+                    hint_timestamp = int(wayback_match.group(1))
                     parsed = urlsplit(wayback_match.group(2))
 
                 extension = Path(parsed.path).suffix.lower()
@@ -237,23 +258,44 @@ class WaybackDownloader:
                     continue
 
                 asset_url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
-                asset_timestamp = self._resolve_asset_timestamp(asset_url, parent_snapshot.timestamp)
-
-                if parsed.hostname == current_project_host:
-                    asset_file_id = parsed.path.lstrip("/")
-                    if parsed.query:
-                        asset_file_id = f"{asset_file_id}?{parsed.query}"
-                else:
-                    asset_file_id = asset_url
-
-                snapshot = Snapshot(
-                    original_url=asset_url,
-                    timestamp=asset_timestamp,
-                    file_id=self.mapper.sanitize_file_id(asset_file_id, asset_url),
-                )
-                self._queue_additional_snapshot(snapshot, job_queue)
+                self._queue_asset_for_url(asset_url, hint_timestamp, job_queue)
             except Exception:
                 continue
+
+    def _queue_asset_for_url(
+        self,
+        asset_url: str,
+        hint_timestamp: int,
+        job_queue: queue.Queue[Snapshot | None],
+    ) -> None:
+        """Convert an absolute URL into a Snapshot and queue it for download.
+
+        Shared between the page-requisites HTML scan and the rewriter's URL
+        collection: both discovery paths funnel through the same dedup,
+        file_id, and timestamp-resolution logic.
+        """
+
+        try:
+            parsed = urlsplit(asset_url)
+            if not parsed.scheme or not parsed.hostname:
+                return
+            normalized_url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
+            current_project_host = self._target_host()
+            if parsed.hostname == current_project_host:
+                asset_file_id = parsed.path.lstrip("/")
+                if parsed.query:
+                    asset_file_id = f"{asset_file_id}?{parsed.query}"
+            else:
+                asset_file_id = normalized_url
+            asset_timestamp = self._resolve_asset_timestamp(normalized_url, hint_timestamp)
+            snapshot = Snapshot(
+                original_url=normalized_url,
+                timestamp=asset_timestamp,
+                file_id=self.mapper.sanitize_file_id(asset_file_id, normalized_url),
+            )
+            self._queue_additional_snapshot(snapshot, job_queue)
+        except Exception:
+            return
 
     def _queue_additional_snapshot(self, snapshot: Snapshot, job_queue: queue.Queue[Snapshot | None]) -> None:
         with self._session_lock:
@@ -264,23 +306,53 @@ class WaybackDownloader:
         job_queue.put(snapshot)
 
     def _resolve_asset_timestamp(self, asset_url: str, parent_timestamp: int) -> int:
-        """Pick the newest asset snapshot at or before the parent page time."""
+        """Pick the newest asset snapshot at or before the parent page time.
 
-        snapshots = self.archive.fetch_snapshot_page(asset_url, 0)
-        if not snapshots:
-            return parent_timestamp
-        eligible = [snapshot for snapshot in snapshots if snapshot[0] <= parent_timestamp]
-        if eligible:
-            return max(eligible, key=lambda item: item[0])[0]
-        return max(snapshots, key=lambda item: item[0])[0]
+        The original implementation issued one CDX search per asset, which on
+        large WordPress-style sites would queue hundreds of slow API calls (one
+        per linked CSS/JS/image). Same-site assets are already enumerated in
+        the site-wide CDX listing we cached at startup, so this now does an
+        in-memory lookup. For assets that are not in the index (typically
+        cross-origin CDN URLs) we fall back to ``parent_timestamp`` and let
+        Wayback's ``id_`` endpoint redirect to its closest capture — the
+        download path already follows those 302s.
+        """
+
+        index = self._asset_snapshot_index
+        if index is not None:
+            timestamps = index.get(self._asset_index_key(asset_url))
+            if timestamps:
+                eligible = [timestamp for timestamp in timestamps if timestamp <= parent_timestamp]
+                return max(eligible) if eligible else max(timestamps)
+        return parent_timestamp
 
     def _planned_snapshots(self) -> list[Snapshot]:
         raw_snapshots = self._raw_snapshots()
+        if self._asset_snapshot_index is None:
+            self._asset_snapshot_index = self._build_asset_index(raw_snapshots)
         return self.planner.build(
             raw_snapshots,
             all_timestamps=self.config.all_timestamps,
             snapshot_at=self.config.snapshot_at,
         )
+
+    @staticmethod
+    def _build_asset_index(raw_snapshots: list[tuple[int, str]]) -> dict[str, list[int]]:
+        """Group the cached CDX rows by URL so asset lookups are O(1)."""
+
+        index: dict[str, list[int]] = {}
+        for timestamp, url in raw_snapshots:
+            index.setdefault(WaybackDownloader._asset_index_key(url), []).append(int(timestamp))
+        return index
+
+    @staticmethod
+    def _asset_index_key(url: str) -> str:
+        """Build a scheme-insensitive lookup key (host + path + query)."""
+
+        parsed = urlsplit(url if "://" in url else f"http://{url}")
+        host = (parsed.hostname or "").lower()
+        path = parsed.path or "/"
+        return f"{host}{path}?{parsed.query}" if parsed.query else f"{host}{path}"
 
     def _raw_snapshots(self) -> list[tuple[int, str]]:
         cached = None if self.config.reset else self.state.load_snapshot_cache()
