@@ -196,6 +196,62 @@ class RewriteTests(unittest.TestCase):
         decoded = _json.loads("{" + rewritten + "}")
         self.assertTrue(decoded["concatemoji"].startswith("./wp-includes/"))
 
+    def test_absolute_url_in_nested_file_uses_depth_relative_prefix(self) -> None:
+        # Regression: the rewriter used to emit ``./wp-includes/...`` for
+        # absolute URLs regardless of file depth. In a file at
+        # ``foo/bar/index.html`` the browser resolved that against the file's
+        # directory and asked for ``foo/bar/wp-includes/...`` (404 locally).
+        # Worse, the page-requisites extractor did the same urljoin and
+        # queued phantom URLs like ``https://host/foo/bar/wp-includes/...``
+        # for download, which produced thousands of NOT FOUND errors.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            file_path = root / "foo" / "bar" / "index.html"
+            file_path.parent.mkdir(parents=True)
+            file_path.write_text(
+                '<link href="https://voteforit.nz/wp-includes/style.css">'
+                '<script src="https://voteforit.nz/wp-includes/js/wp.js"></script>'
+                '<style>.bg { background: url("https://voteforit.nz/img/bg.png"); }</style>',
+                encoding="utf-8",
+            )
+
+            rewriter = LocalLinkRewriter()
+            rewriter.rewrite_file(file_path, root)
+            content = file_path.read_text(encoding="utf-8")
+
+            self.assertIn('href="../../wp-includes/style.css"', content)
+            self.assertIn('src="../../wp-includes/js/wp.js"', content)
+            self.assertIn('url("../../img/bg.png")', content)
+            self.assertNotIn('href="./wp-includes/', content)
+            self.assertNotIn('src="./wp-includes/', content)
+
+    def test_host_regex_stops_at_quotes_and_whitespace(self) -> None:
+        # Regression: with the old ``[^/]+`` host pattern, a closing quote
+        # immediately after the host let the host class swallow the quote
+        # plus any following text up to the next ``/``. Captured "URLs"
+        # like ``https://www.googletagmanager.com' /><link rel=`` then got
+        # queued for download. The tightened host pattern must stop at
+        # the closing quote so the URL is collected cleanly.
+        rewriter = LocalLinkRewriter()
+        html = (
+            "<script src='https://www.googletagmanager.com/gtag/js?id=GT-X'/>"
+            "<link rel='preconnect' href='https://fonts.gstatic.com/'>"
+        )
+        collected: list[str] = []
+        rewriter.rewrite_html_attribute_urls(html, collected_urls=collected)
+
+        # Every captured URL should be a clean URL with no stray quote,
+        # whitespace, or attribute fragment embedded in it.
+        for url in collected:
+            self.assertNotIn("'", url, msg=f"stray quote in {url!r}")
+            self.assertNotIn(" ", url, msg=f"stray whitespace in {url!r}")
+            self.assertNotIn(">", url, msg=f"stray angle bracket in {url!r}")
+            self.assertNotIn("<", url, msg=f"stray angle bracket in {url!r}")
+
+        # And the two real URLs are still captured.
+        self.assertTrue(any("googletagmanager.com" in url for url in collected))
+        self.assertTrue(any("fonts.gstatic.com" in url for url in collected))
+
     def test_directory_style_url_resolves_to_directory_index(self) -> None:
         # Regression: a trailing slash used to be sanitized into an empty
         # segment then promoted to "_", producing paths like
