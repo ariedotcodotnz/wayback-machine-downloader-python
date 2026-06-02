@@ -211,15 +211,32 @@ class ArchiveClient:
                 time.sleep(self.RETRY_DELAY * retries)
 
     def normalize_query_url(self, target_url: str) -> str:
+        """Normalize non-exact targets into the CDX prefix form users expect.
+
+        The Wayback CDX API treats plain ``example.com/`` or ``example.com/wiki/``
+        as exact URLs, which often returns only the index page capture. The Ruby
+        fork learned to append ``/*`` for host-only requests; we extend that
+        idea to trailing-slash directory requests too, unless ``--exact-url`` or
+        an explicit wildcard is already present.
+        """
+
         if self.config.exact_url:
             return target_url
         normalized = target_url.strip()
-        if "*" in normalized:
+        query_split = re.search(r"[?#]", normalized)
+        prefix = normalized[: query_split.start()] if query_split else normalized
+        suffix = normalized[query_split.start() :] if query_split else ""
+        if "*" in prefix:
             return normalized
-        stripped = re.sub(r"^https?://", "", normalized, flags=re.IGNORECASE)
+        if suffix:
+            return normalized
+
+        stripped = re.sub(r"^https?://", "", prefix, flags=re.IGNORECASE)
         host_and_rest = re.split(r"[?#]", stripped, maxsplit=1)[0]
         if "/" not in host_and_rest:
-            return f"{normalized}/*"
+            return f"{prefix.rstrip('/')}/*{suffix}"
+        if prefix.endswith("/"):
+            return f"{prefix}*{suffix}"
         return normalized
 
     def _decode_body(self, body: bytes, headers: dict[str, str] | object, *, source: str) -> bytes:

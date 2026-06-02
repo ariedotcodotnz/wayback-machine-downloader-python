@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from wayback_downloader.archive import ArchiveClient
 from wayback_downloader.config import DownloadConfig
@@ -71,6 +71,12 @@ class SnapshotPlannerTests(unittest.TestCase):
         self.assertIn("__q", sanitized)
 
 
+class ConfigTests(unittest.TestCase):
+    def test_backup_name_uses_host_for_targets_with_tilde_paths(self) -> None:
+        config = DownloadConfig(target="orbita.starmedia.com/~angra-site")
+        self.assertEqual(config.backup_name, "orbita.starmedia.com")
+
+
 class ArchiveClientTests(unittest.TestCase):
     def test_default_parameters_match_ruby_behavior(self) -> None:
         config = DownloadConfig(target="https://example.com")
@@ -109,6 +115,14 @@ class ArchiveClientTests(unittest.TestCase):
         result = client.download_capture("http://www.example.com/bad.gz", 20200101000000)
 
         self.assertEqual(result.body, b"not really gzip")
+
+    def test_normalize_query_url_adds_wildcards_for_root_and_directory_targets(self) -> None:
+        client = ArchiveClient(DownloadConfig(target="https://example.com"), transport=FakeTransport({}))
+        self.assertEqual(client.normalize_query_url("https://example.com/"), "https://example.com/*")
+        self.assertEqual(client.normalize_query_url("example.com"), "example.com/*")
+        self.assertEqual(client.normalize_query_url("https://example.com/wiki/"), "https://example.com/wiki/*")
+        self.assertEqual(client.normalize_query_url("https://example.com/wiki/page.html"), "https://example.com/wiki/page.html")
+        self.assertEqual(client.normalize_query_url("https://example.com/search?q=test"), "https://example.com/search?q=test")
 
 
 class RewriteTests(unittest.TestCase):
@@ -169,6 +183,44 @@ class DownloaderTests(unittest.TestCase):
             self.assertTrue((root / "logo.png").exists())
             self.assertEqual((root / "logo.png").read_bytes(), b"image-bytes")
             downloader.archive.download_capture.assert_called_once_with("http://example.com/logo.png", 20200101000000)
+
+    def test_existing_files_do_not_trigger_rate_limit_sleep(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = DownloadConfig(target="https://example.com", directory=root, rate_limit=0.25, max_retries=0)
+            downloader = WaybackDownloader(config, transport=FakeTransport({}))
+
+            existing_html = root / "index.html"
+            existing_html.parent.mkdir(parents=True, exist_ok=True)
+            existing_html.write_text("already here", encoding="utf-8")
+
+            downloader._planned_snapshots = Mock(
+                return_value=[Snapshot("http://example.com/index.html", 20200101000000, "index.html")]
+            )
+
+            with patch("wayback_downloader.downloader.time.sleep") as mocked_sleep:
+                downloader.download()
+
+            mocked_sleep.assert_not_called()
+
+    def test_existing_files_do_not_duplicate_db_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = DownloadConfig(target="https://example.com", directory=root, max_retries=0, keep_state=True)
+            downloader = WaybackDownloader(config, transport=FakeTransport({}))
+
+            existing_html = root / "index.html"
+            existing_html.parent.mkdir(parents=True, exist_ok=True)
+            existing_html.write_text("already here", encoding="utf-8")
+            (root / ".downloaded.txt").write_text("index.html\n", encoding="utf-8")
+
+            downloader._planned_snapshots = Mock(
+                return_value=[Snapshot("http://example.com/index.html", 20200101000000, "index.html")]
+            )
+
+            downloader.download()
+
+            self.assertEqual((root / ".downloaded.txt").read_text(encoding="utf-8"), "index.html\n")
 
 
 if __name__ == "__main__":
