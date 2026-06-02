@@ -13,6 +13,7 @@ from wayback_downloader.models import FetchDisposition, FetchResult, HTTPRespons
 from wayback_downloader.paths import LocalPathMapper
 from wayback_downloader.requisites import PageRequisitesExtractor
 from wayback_downloader.snapshots import SnapshotPlanner
+from wayback_downloader.text import repeated_percent_decode
 from wayback_downloader.url_rewrite import LocalLinkRewriter
 
 
@@ -118,6 +119,31 @@ class ArchiveClientTests(unittest.TestCase):
         self.assertEqual(client.normalize_query_url("https://example.com/wiki/page.html"), "https://example.com/wiki/page.html")
 
 
+class RepeatedPercentDecodeTests(unittest.TestCase):
+    def test_ascii_without_escapes_is_unchanged(self) -> None:
+        self.assertEqual(repeated_percent_decode("plain/path"), b"plain/path")
+
+    def test_single_utf8_percent_escape_unwraps(self) -> None:
+        self.assertEqual(repeated_percent_decode("caf%C3%A9"), "café".encode("utf-8"))
+
+    def test_double_percent_escape_unwraps_twice(self) -> None:
+        self.assertEqual(repeated_percent_decode("caf%25C3%25A9"), "café".encode("utf-8"))
+
+    def test_raw_non_ascii_terminates_without_growing(self) -> None:
+        # This is the regression case: the previous implementation grew the
+        # working string on every iteration when given non-ASCII input and
+        # eventually triggered MemoryError. The fix should return immediately.
+        self.assertEqual(repeated_percent_decode("café"), "café".encode("utf-8"))
+
+    def test_legacy_byte_sequence_is_returned_verbatim(self) -> None:
+        # cp1251-encoded "привет" percent-escaped should come out as raw bytes
+        # so the caller can sniff the right encoding via decode_best_effort.
+        self.assertEqual(
+            repeated_percent_decode("%EF%F0%E8%E2%E5%F2"),
+            b"\xef\xf0\xe8\xe2\xe5\xf2",
+        )
+
+
 class RewriteTests(unittest.TestCase):
     def test_page_requisite_extraction_supports_srcset(self) -> None:
         html = '<img srcset="one.jpg 1x, two.jpg 2x"><script src="app.js"></script>'
@@ -142,6 +168,87 @@ class RewriteTests(unittest.TestCase):
         rewriter = LocalLinkRewriter()
         rewritten = rewriter.normalize_path_for_local("/assets/app.css?version=123")
         self.assertRegex(rewritten, r"^\./assets/app__q[0-9a-f]{12}\.css$")
+
+    def test_protocol_relative_html_attribute_is_rewritten(self) -> None:
+        rewriter = LocalLinkRewriter()
+        # The user's real-world case: WordPress emits <link href='//host/...'>
+        # which the previous rewriter ignored because the scheme was missing.
+        html = " href='//voteforit.nz/wp-content/plugins/foo/style.css?ver=1.0'"
+        rewritten = rewriter.rewrite_html_attribute_urls(html)
+        self.assertNotIn("voteforit.nz", rewritten)
+        self.assertRegex(rewritten, r"href='\./wp-content/plugins/foo/style__q[0-9a-f]{12}\.css'")
+
+    def test_json_escaped_url_is_rewritten_with_preserved_escapes(self) -> None:
+        rewriter = LocalLinkRewriter()
+        content = '"concatemoji":"https:\\/\\/voteforit.nz\\/wp-includes\\/js\\/wp-emoji-release.min.js?ver=6.8.3"'
+        rewritten = rewriter.rewrite_json_escaped_urls(content)
+
+        self.assertNotIn("voteforit.nz", rewritten)
+        # The substituted path is a local relative path with slashes escaped
+        # the same way as the source JSON so the surrounding literal stays
+        # well-formed.
+        self.assertRegex(
+            rewritten,
+            r'"concatemoji":"\.\\/wp-includes\\/js\\/wp-emoji-release\.min__q[0-9a-f]{12}\.js"',
+        )
+        # Round-trip safety: the rewritten string should still be valid JSON.
+        import json as _json
+        decoded = _json.loads("{" + rewritten + "}")
+        self.assertTrue(decoded["concatemoji"].startswith("./wp-includes/"))
+
+    def test_directory_style_url_resolves_to_directory_index(self) -> None:
+        # Regression: a trailing slash used to be sanitized into an empty
+        # segment then promoted to "_", producing paths like
+        # "./foo/_/index.html" instead of "./foo/index.html".
+        rewriter = LocalLinkRewriter()
+        self.assertEqual(
+            rewriter.normalize_path_for_local("/images/core/emoji/16.0.1/72x72/"),
+            "./images/core/emoji/16.0.1/72x72/index.html",
+        )
+
+    def test_json_escaped_wayback_wrapped_url_unwraps_to_local_path(self) -> None:
+        rewriter = LocalLinkRewriter()
+        content = '"u":"https:\\/\\/web.archive.org\\/web\\/20240101000000id_\\/https:\\/\\/voteforit.nz\\/wp-content\\/uploads\\/photo.jpg"'
+        rewritten = rewriter.rewrite_json_escaped_urls(content)
+        self.assertNotIn("web.archive.org", rewritten)
+        self.assertNotIn("voteforit.nz", rewritten)
+        self.assertIn("\\/wp-content\\/uploads\\/photo.jpg", rewritten)
+
+    def test_collected_urls_covers_every_syntactic_variant(self) -> None:
+        # Single HTML file mixing all four URL forms the rewriter handles.
+        # The collected list should hold the canonical https://host/path form
+        # for each, regardless of how it appeared in the source.
+        rewriter = LocalLinkRewriter()
+        content = (
+            "<link href='https://voteforit.nz/wp-content/style.css?ver=1' />"
+            "<link href='//voteforit.nz/wp-content/protocol-relative.css' />"
+            "<img src='https://web.archive.org/web/20240101id_/https://voteforit.nz/wayback-wrapped.png' />"
+            "<style>.bg { background: url('https://voteforit.nz/img/bg.png'); }</style>"
+            "<script>var cfg = {\"url\":\"https:\\/\\/voteforit.nz\\/api\\/data.json\"};</script>"
+        )
+        collected: list[str] = []
+        # Run every rewrite pass so each kind of URL gets seen.
+        rewriter.rewrite_html_attribute_urls(content, collected_urls=collected)
+        rewriter.rewrite_css_urls(content, collected_urls=collected)
+        rewriter.rewrite_js_urls(content, collected_urls=collected)
+        rewriter.rewrite_json_escaped_urls(content, collected_urls=collected)
+
+        # The harvest may yield duplicates because the standard JS pattern
+        # also matches quoted HTML attributes — that's fine, the downloader
+        # dedups via file_id. We just need every original URL present.
+        unique = set(collected)
+        self.assertIn("https://voteforit.nz/wp-content/style.css?ver=1", unique)
+        self.assertIn("https://voteforit.nz/wp-content/protocol-relative.css", unique)
+        self.assertIn("https://voteforit.nz/wayback-wrapped.png", unique)
+        self.assertIn("https://voteforit.nz/img/bg.png", unique)
+        self.assertIn("https://voteforit.nz/api/data.json", unique)
+
+    def test_collected_urls_default_off_for_backward_compatibility(self) -> None:
+        # Calling the methods without ``collected_urls`` should not raise and
+        # should not allocate or surface any collection state.
+        rewriter = LocalLinkRewriter()
+        result = rewriter.rewrite_html_attribute_urls("<a href='https://example.com/'>x</a>")
+        self.assertIn("./index.html", result)
 
 
 class DownloaderTests(unittest.TestCase):
@@ -176,6 +283,97 @@ class DownloaderTests(unittest.TestCase):
             self.assertTrue((root / "logo.png").exists())
             self.assertEqual((root / "logo.png").read_bytes(), b"image-bytes")
             downloader.archive.download_capture.assert_called_once_with("http://example.com/logo.png", 20200101000000)
+
+    def test_asset_timestamp_lookup_uses_inmemory_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = DownloadConfig(target="https://example.com", directory=Path(temp_dir), page_requisites=True, max_retries=0)
+            downloader = WaybackDownloader(config, transport=FakeTransport({}))
+            downloader._asset_snapshot_index = downloader._build_asset_index(
+                [
+                    (20180101000000, "http://example.com/logo.png"),
+                    (20200101000000, "http://example.com/logo.png"),
+                    (20250101000000, "http://example.com/logo.png"),
+                ]
+            )
+            # Forbid network access for the duration of the lookup so any
+            # regression that reintroduces the per-asset CDX call fails loudly.
+            downloader.archive.fetch_snapshot_page = Mock(side_effect=AssertionError("must not call CDX"))
+
+            # Picks the newest snapshot at or before the parent timestamp.
+            self.assertEqual(
+                downloader._resolve_asset_timestamp("https://example.com/logo.png", 20210101000000),
+                20200101000000,
+            )
+            # If every indexed snapshot is newer than the parent we still pick
+            # something archived rather than failing.
+            self.assertEqual(
+                downloader._resolve_asset_timestamp("https://example.com/logo.png", 20100101000000),
+                20250101000000,
+            )
+
+    def test_asset_timestamp_falls_back_to_parent_when_not_indexed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = DownloadConfig(target="https://example.com", directory=Path(temp_dir), page_requisites=True, max_retries=0)
+            downloader = WaybackDownloader(config, transport=FakeTransport({}))
+            downloader._asset_snapshot_index = {}
+            downloader.archive.fetch_snapshot_page = Mock(side_effect=AssertionError("must not call CDX"))
+
+            self.assertEqual(
+                downloader._resolve_asset_timestamp("https://cdn.example.org/jquery.js", 20200101000000),
+                20200101000000,
+            )
+
+    def test_rewriter_collected_urls_are_queued_for_download(self) -> None:
+        # The HTML body contains a JSON-escaped script URL that the page-
+        # requisites extractor (HTML attribute scanner) does NOT see. Only the
+        # rewriter catches it. The downloader should still queue and download
+        # the script via the rewriter-collected URL path.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = DownloadConfig(
+                target="https://example.com",
+                directory=root,
+                page_requisites=True,
+                rewrite_to_local=True,
+                max_retries=0,
+            )
+            downloader = WaybackDownloader(config, transport=FakeTransport({}))
+
+            html_body = (
+                "<html><body>"
+                "<script>var cfg = {\"endpoint\":\"https:\\/\\/example.com\\/api\\/widget.js\"};</script>"
+                "</body></html>"
+            ).encode("utf-8")
+            script_body = b"console.log('widget');"
+
+            downloader._planned_snapshots = Mock(
+                return_value=[Snapshot("http://example.com/index.html", 20240101000000, "index.html")]
+            )
+            downloader._resolve_asset_timestamp = Mock(return_value=20240101000000)
+
+            def fake_download(url: str, timestamp: int):
+                if url == "http://example.com/index.html":
+                    body = html_body
+                elif url == "https://example.com/api/widget.js":
+                    body = script_body
+                else:
+                    raise AssertionError(f"unexpected download {url}")
+                return FetchResult(
+                    disposition=FetchDisposition.SAVED,
+                    body=body,
+                    source_url=url,
+                    status_code=200,
+                )
+
+            downloader.archive.download_capture = Mock(side_effect=fake_download)
+
+            downloader.download()
+
+            # The script discovered only via the rewriter's JSON-escaped pass
+            # should now exist on disk where the rewritten reference points.
+            widget_path = root / "api" / "widget.js"
+            self.assertTrue(widget_path.exists(), f"expected {widget_path} to exist")
+            self.assertEqual(widget_path.read_bytes(), script_body)
 
     def test_existing_files_do_not_trigger_rate_limit_sleep(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
