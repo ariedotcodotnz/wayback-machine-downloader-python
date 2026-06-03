@@ -184,12 +184,6 @@ references after files are saved. It handles:
 `--local-only` performs only the rewrite phase on an existing directory and
 does not contact the archive.
 
-## Documentation
-
-- [CLI reference](https://github.com/ariedotcodotnz/wayback-machine-downloader-python/blob/master/docs/cli-reference.md)
-- [Architecture guide](https://github.com/ariedotcodotnz/wayback-machine-downloader-python/blob/master/docs/architecture.md)
-- [Development and testing](https://github.com/ariedotcodotnz/wayback-machine-downloader-python/blob/master/docs/development.md)
-
 ## Publishing
 
 ### GitHub Actions automation
