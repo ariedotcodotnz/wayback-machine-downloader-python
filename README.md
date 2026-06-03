@@ -1,4 +1,4 @@
-# wayback-machine-downloader-python
+# Wayback Machine Downloader
 
 A Python port of the original Ruby [`wayback-machine-downloader`](https://github.com/StrawberryMaster/wayback-machine-downloader), built for users who prefer a Python-based workflow for downloading archived websites from the Internet Archive Wayback Machine.
 
@@ -22,6 +22,15 @@ This Python version includes a number of extra fixes, improvements, and quality-
 - Python 3.10 or newer
 
 ## Installation
+
+Install the published package from PyPI:
+
+```bash
+python -m pip install wayback-machine-downloader
+```
+
+The PyPI distribution name is `wayback-machine-downloader`; the import package
+remains `wayback_downloader`.
 
 Install the package in editable mode while developing:
 
@@ -173,9 +182,36 @@ does not contact the archive.
 
 ## Documentation
 
-- [CLI reference](docs/cli-reference.md)
-- [Architecture guide](docs/architecture.md)
-- [Development and testing](docs/development.md)
+- [CLI reference](https://github.com/ariedotcodotnz/wayback-machine-downloader-python/blob/master/docs/cli-reference.md)
+- [Architecture guide](https://github.com/ariedotcodotnz/wayback-machine-downloader-python/blob/master/docs/architecture.md)
+- [Development and testing](https://github.com/ariedotcodotnz/wayback-machine-downloader-python/blob/master/docs/development.md)
+
+## Publishing
+
+Build and validate the distribution archives:
+
+```bash
+python -m pip install --upgrade build twine
+python -m build
+python -m twine check dist/*
+```
+
+Upload to TestPyPI first:
+
+```bash
+python -m twine upload --repository testpypi dist/*
+```
+
+Upload to PyPI:
+
+```bash
+python -m twine upload dist/*
+```
+
+Use an API token when Twine prompts for credentials:
+
+- username: `__token__`
+- password: your `pypi-...` token
 
 ## Testing
 

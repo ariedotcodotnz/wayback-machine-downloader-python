@@ -1,17 +1,41 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "wayback-downloader"
+name = "wayback-machine-downloader"
 version = "0.1.0"
-description = "Object-oriented Python downloader for Internet Archive Wayback Machine snapshots."
+description = "Download and rewrite archived websites from the Internet Archive Wayback Machine."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
-  { name = "OpenAI Codex" },
+  { name = "Arie Joe", email = "78839335+ariedotcodotnz@users.noreply.github.com" },
 ]
+keywords = ["wayback", "internet archive", "archiving", "downloader", "cli", "website mirroring"]
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Information Technology",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+  "Topic :: System :: Archiving",
+]
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/ariedotcodotnz/wayback-machine-downloader-python"
+Documentation = "https://github.com/ariedotcodotnz/wayback-machine-downloader-python/tree/master/docs"
+Repository = "https://github.com/ariedotcodotnz/wayback-machine-downloader-python"
+Issues = "https://github.com/ariedotcodotnz/wayback-machine-downloader-python/issues"
 
 [project.scripts]
 wayback-machine-downloader = "wayback_downloader.cli:main"
