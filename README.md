@@ -1,15 +1,10 @@
-# wayback-downloader
+# wayback-machine-downloader-python
 
-`wayback-downloader` is an object-oriented Python rewrite of the Ruby
-Wayback Machine downloader. It mirrors the original tool's core workflows
-while organizing the implementation into small, testable modules.
+A Python port of the original Ruby [`wayback-machine-downloader`](https://github.com/StrawberryMaster/wayback-machine-downloader), built for users who prefer a Python-based workflow for downloading archived websites from the Internet Archive Wayback Machine.
 
-The project focuses on four things:
+This tool helps recover, mirror, and archive old websites from Wayback Machine snapshots. It is useful for digital preservation, website recovery, static site restoration, OSINT research, historical web analysis, and rebuilding sites that are no longer online.
 
-- predictable snapshot selection
-- resumable downloads
-- local/offline-friendly output
-- maintainable Python code
+This Python version includes a number of extra fixes, improvements, and quality-of-life changes over the original Ruby implementation.
 
 ## Highlights
 
