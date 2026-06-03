@@ -33,7 +33,7 @@ dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/ariedotcodotnz/wayback-machine-downloader-python"
-Documentation = "https://github.com/ariedotcodotnz/wayback-machine-downloader-python/tree/master/docs"
+Documentation = "https://github.com/ariedotcodotnz/wayback-machine-downloader-python/wiki"
 Repository = "https://github.com/ariedotcodotnz/wayback-machine-downloader-python"
 Issues = "https://github.com/ariedotcodotnz/wayback-machine-downloader-python/issues"
 

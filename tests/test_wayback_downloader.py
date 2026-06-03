@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from wayback_downloader.archive import ArchiveClient
+from wayback_downloader.cli import build_config, build_parser
 from wayback_downloader.config import DownloadConfig
 from wayback_downloader.downloader import WaybackDownloader
 from wayback_downloader.filters import URLFilter
@@ -117,6 +118,16 @@ class ArchiveClientTests(unittest.TestCase):
         self.assertEqual(client.normalize_query_url("example.com"), "example.com/*")
         self.assertEqual(client.normalize_query_url("https://example.com/wiki/"), "https://example.com/wiki/*")
         self.assertEqual(client.normalize_query_url("https://example.com/wiki/page.html"), "https://example.com/wiki/page.html")
+
+
+class CliTests(unittest.TestCase):
+    def test_cross_host_flag_reaches_runtime_config(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["--cross-host", "https://example.com"])
+
+        config = build_config(args)
+
+        self.assertTrue(config.cross_host)
 
 
 class RepeatedPercentDecodeTests(unittest.TestCase):

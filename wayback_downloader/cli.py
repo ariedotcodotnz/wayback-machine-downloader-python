@@ -110,6 +110,7 @@ def build_config(args: argparse.Namespace) -> DownloadConfig:
         recursive_subdomains=args.recursive_subdomains,
         subdomain_depth=args.subdomain_depth,
         page_requisites=args.page_requisites,
+        cross_host=args.cross_host,
         timeout=args.timeout,
     )
 
