@@ -279,8 +279,15 @@ class WaybackDownloader:
             parsed = urlsplit(asset_url)
             if not parsed.scheme or not parsed.hostname:
                 return
-            normalized_url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
             current_project_host = self._target_host()
+            # Default behavior bounds the crawl to the target host. Without
+            # this, the rewriter+page-requisites feedback loop expands into
+            # social profiles, CDN-hosted libraries, third-party widgets, and
+            # navigation links — all of which balloon the queue and produce
+            # 404s when those assets aren't archived under the same prefix.
+            if not self.config.cross_host and parsed.hostname != current_project_host:
+                return
+            normalized_url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
             if parsed.hostname == current_project_host:
                 asset_file_id = parsed.path.lstrip("/")
                 if parsed.query:

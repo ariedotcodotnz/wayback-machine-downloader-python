@@ -36,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--recursive-subdomains", action="store_true", help="Discover and download linked subdomains.")
     parser.add_argument("--subdomain-depth", type=int, default=1, help="Maximum recursion depth for subdomain discovery.")
     parser.add_argument("--page-requisites", action="store_true", help="Queue linked page assets after downloading HTML files.")
+    parser.add_argument(
+        "--cross-host",
+        action="store_true",
+        help="Also queue and download URLs from hosts other than the target. Off by default — without it, only same-host URLs are mirrored, which keeps the crawl bounded.",
+    )
     parser.add_argument("--timeout", type=float, default=30.0, help="HTTP timeout in seconds.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
@@ -74,6 +79,7 @@ def build_config(args: argparse.Namespace) -> DownloadConfig:
             recursive_subdomains=args.recursive_subdomains,
             subdomain_depth=args.subdomain_depth,
             page_requisites=args.page_requisites,
+            cross_host=args.cross_host,
             timeout=args.timeout,
         )
 

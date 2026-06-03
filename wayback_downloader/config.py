@@ -30,6 +30,7 @@ class DownloadConfig:
     recursive_subdomains: bool = False
     subdomain_depth: int = 1
     page_requisites: bool = False
+    cross_host: bool = False
     timeout: float = 30.0
     rate_limit: float = 0.25
 

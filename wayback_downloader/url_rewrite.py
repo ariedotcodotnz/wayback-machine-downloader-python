@@ -6,7 +6,7 @@ from os import name as os_name
 from pathlib import Path
 from typing import Iterable
 
-from .paths import sanitize_reference_path
+from .paths import _apply_query_digest, sanitize_reference_path
 from .text import decode_with_candidates
 
 
@@ -52,6 +52,34 @@ _COLLECT_JSON_WAYBACK = re.compile(
 )
 _COLLECT_JSON_STD = re.compile(
     rf"""["'](?:https?:)?\\/\\/({_JSON_HOST})((?:\\/[^"']*?)?)["']""",
+    re.IGNORECASE,
+)
+
+# Matches the entire value of a ``srcset`` attribute so we can split it on
+# commas and rewrite each URL individually. Must run before the standard JS
+# pass, which would otherwise capture the whole comma-joined value as a single
+# garbage URL.
+_SRCSET_ATTR = re.compile(
+    r"""(\s(?:srcset|data-srcset|imagesrcset)\s*=\s*["'])([^"']+)(["'])""",
+    re.IGNORECASE,
+)
+_SRCSET_DESCRIPTOR = re.compile(r"^\d+(?:\.\d+)?[wx]$", re.IGNORECASE)
+_ABSOLUTE_OR_PROTO_REL = re.compile(rf"^(?:https?:)?//({_HOST})(.*)$", re.IGNORECASE)
+
+# Matches a CSS ``url(...)`` whose argument is a relative URL with a query
+# string (e.g. ``url("fonts/icon.woff?v=4.2")``). The downloader folds query
+# strings into the filename (saving as ``icon__q<hash>.woff``), but a relative
+# reference like this is invisible to the existing absolute-URL passes, so the
+# browser ends up asking for the literal ``icon.woff?v=4.2`` URL and 404s.
+# This pass rewrites the reference to match the on-disk filename.
+#
+# The query is required to start with an alphanumeric character (or ``_``),
+# which excludes JS optional chaining (``obj?.prop``, ``arr?.[i]``, ``fn?.()``).
+# Without this, case-insensitive ``url\(`` matched ``URL(`` inside identifiers
+# like ``compareURL(`` and folded the JS expression into a ``__q<hash>``
+# filename — silently corrupting minified JS that used optional chaining.
+_CSS_RELATIVE_QUERY = re.compile(
+    r"""(url\(\s*["']?)((?!data:|https?:|//)[^"')\s]+\?[a-zA-Z0-9_][^"')\s]*)(["']?\s*\))""",
     re.IGNORECASE,
 )
 
@@ -117,10 +145,30 @@ class LocalLinkRewriter:
         # file's own directory.
         root_prefix = self.site_root_relative_prefix(file_path, site_root)
 
-        content = self.rewrite_html_attribute_urls(content, root_prefix=root_prefix, collected_urls=collected_urls)
-        content = self.rewrite_css_urls(content, root_prefix=root_prefix, collected_urls=collected_urls)
-        content = self.rewrite_js_urls(content, root_prefix=root_prefix, collected_urls=collected_urls)
-        content = self.rewrite_json_escaped_urls(content, root_prefix=root_prefix, collected_urls=collected_urls)
+        # Gate passes by file type so a regex that's safe in one context
+        # doesn't run in another where it can produce corruption. For
+        # example, CSS ``url\(`` is case-insensitive and matches ``URL(``
+        # inside identifiers like ``compareURL(``; running the CSS pass on
+        # a minified JS file with optional chaining (``obj?.prop``) silently
+        # rewrites the JS expression into a ``__q<hash>`` filename.
+        suffix = file_path.suffix.lower()
+        is_html_like = suffix in {".html", ".htm", ".php", ".asp", ".aspx", ".jsp"}
+        is_css = suffix == ".css"
+        is_js = suffix == ".js"
+
+        if is_html_like:
+            # srcset must run first: it splits the comma-joined value into
+            # individual URLs and rewrites each one, so subsequent passes
+            # don't accidentally match the entire srcset attribute value as
+            # one URL.
+            content = self.rewrite_srcset_urls(content, root_prefix=root_prefix, collected_urls=collected_urls)
+            content = self.rewrite_html_attribute_urls(content, root_prefix=root_prefix, collected_urls=collected_urls)
+        if is_html_like or is_css:
+            content = self.rewrite_css_urls(content, root_prefix=root_prefix, collected_urls=collected_urls)
+            content = self.rewrite_css_relative_query_urls(content)
+        if is_html_like or is_js:
+            content = self.rewrite_js_urls(content, root_prefix=root_prefix, collected_urls=collected_urls)
+            content = self.rewrite_json_escaped_urls(content, root_prefix=root_prefix, collected_urls=collected_urls)
 
         content = re.sub(
             r"""(\s(?:href|src|action|data-src|data-url)=["'])/([^"'/][^"']*)(["'])""",
@@ -176,6 +224,54 @@ class LocalLinkRewriter:
                 rewritten += 1
         return rewritten
 
+    def rewrite_srcset_urls(self, content: str, *, root_prefix: str = "./", collected_urls: list[str] | None = None) -> str:
+        """Rewrite each URL in ``srcset`` attribute values individually.
+
+        A srcset value looks like ``url1 300w, url2 768w, url3 1536w``. The
+        previous code had no srcset-specific pass, so the standard JS regex
+        captured the whole comma-joined value as one quoted URL — producing
+        bogus download requests like ``https://host/foo.jpg 2000w, https://...``.
+        This pass splits the value, rewrites each absolute URL to a local
+        path (preserving the size descriptor), and reassembles.
+        """
+
+        def replace(match: re.Match) -> str:
+            prefix, value, suffix = match.group(1), match.group(2), match.group(3)
+            new_parts: list[str] = []
+            for raw_part in value.split(","):
+                part = raw_part.strip()
+                if not part:
+                    continue
+                url, descriptor = self._split_srcset_part(part)
+                if collected_urls is not None:
+                    abs_match = _ABSOLUTE_OR_PROTO_REL.match(url)
+                    if abs_match:
+                        collected_urls.append(f"https://{abs_match.group(1)}{abs_match.group(2)}")
+                new_url = self._rewrite_absolute_to_local(url, root_prefix)
+                new_parts.append(f"{new_url} {descriptor}".strip())
+            return f"{prefix}{', '.join(new_parts)}{suffix}"
+
+        return _SRCSET_ATTR.sub(replace, content)
+
+    @staticmethod
+    def _split_srcset_part(part: str) -> tuple[str, str]:
+        """Return ``(url, descriptor)`` for one srcset part; descriptor may be empty."""
+
+        if " " not in part:
+            return part, ""
+        url, candidate = part.rsplit(" ", 1)
+        if _SRCSET_DESCRIPTOR.match(candidate):
+            return url.strip(), candidate
+        return part, ""
+
+    def _rewrite_absolute_to_local(self, url: str, root_prefix: str) -> str:
+        """Rewrite an absolute or protocol-relative URL to a local path; leave others alone."""
+
+        match = _ABSOLUTE_OR_PROTO_REL.match(url)
+        if not match:
+            return url
+        return self._local_path_for(match.group(2), root_prefix)
+
     def rewrite_html_attribute_urls(self, content: str, *, root_prefix: str = "./", collected_urls: list[str] | None = None) -> str:
         # Rewrite Wayback-hosted URLs first so we preserve the original path.
         if collected_urls is not None:
@@ -199,30 +295,38 @@ class LocalLinkRewriter:
 
     def rewrite_css_urls(self, content: str, *, root_prefix: str = "./", collected_urls: list[str] | None = None) -> str:
         # CSS url(...) references appear in archived HTML and in standalone CSS.
+        # Capture the opening and closing quote (or its absence) so the
+        # substitution preserves them. Hardcoding ``url("...")`` previously
+        # broke HTML ``style="..."`` attributes: a substituted ``"`` closed
+        # the style attribute early and the rest of the URL was parsed as
+        # more attributes.
         if collected_urls is not None:
             _harvest(_COLLECT_CSS_WAYBACK, content, collected_urls)
         content = re.sub(
-            rf"""url\(\s*["']?https?://web\.archive\.org/web/\d+(?:id_)?/(?:https?:)?//{_HOST}([^"')]*?)["']?\s*\)""",
-            lambda match: f'url("{self._local_path_for(match.group(1), root_prefix)}")',
+            rf"""url\(\s*(["']?)https?://web\.archive\.org/web/\d+(?:id_)?/(?:https?:)?//{_HOST}([^"')]*?)(["']?)\s*\)""",
+            lambda match: f"url({match.group(1)}{self._local_path_for(match.group(2), root_prefix)}{match.group(3)})",
             content,
             flags=re.IGNORECASE,
         )
         if collected_urls is not None:
             _harvest(_COLLECT_CSS_STD, content, collected_urls)
         return re.sub(
-            rf"""url\(\s*["']?(?:https?:)?//{_HOST}([^"')]*?)["']?\s*\)""",
-            lambda match: f'url("{self._local_path_for(match.group(1), root_prefix)}")',
+            rf"""url\(\s*(["']?)(?:https?:)?//{_HOST}([^"')]*?)(["']?)\s*\)""",
+            lambda match: f"url({match.group(1)}{self._local_path_for(match.group(2), root_prefix)}{match.group(3)})",
             content,
             flags=re.IGNORECASE,
         )
 
     def rewrite_js_urls(self, content: str, *, root_prefix: str = "./", collected_urls: list[str] | None = None) -> str:
-        # JavaScript string literals often embed full absolute URLs.
+        # JavaScript string literals often embed full absolute URLs that are
+        # used as base URLs for concatenation (``base + "subpath"``). Use
+        # ``as_base_url=True`` so a trailing slash on the source URL is
+        # preserved and we don't append ``/index.html``.
         if collected_urls is not None:
             _harvest(_COLLECT_JS_WAYBACK, content, collected_urls)
         content = re.sub(
             rf"""(["'])https?://web\.archive\.org/web/\d+(?:id_)?/(?:https?:)?//{_HOST}([^"']*)(["'])""",
-            lambda match: f"{match.group(1)}{self._local_path_for(match.group(2), root_prefix)}{match.group(3)}",
+            lambda match: f"{match.group(1)}{self._local_path_for(match.group(2), root_prefix, as_base_url=True)}{match.group(3)}",
             content,
             flags=re.IGNORECASE,
         )
@@ -230,10 +334,31 @@ class LocalLinkRewriter:
             _harvest(_COLLECT_JS_STD, content, collected_urls)
         return re.sub(
             rf"""(["'])(?:https?:)?//{_HOST}([^"']*)(["'])""",
-            lambda match: f"{match.group(1)}{self._local_path_for(match.group(2), root_prefix)}{match.group(3)}",
+            lambda match: f"{match.group(1)}{self._local_path_for(match.group(2), root_prefix, as_base_url=True)}{match.group(3)}",
             content,
             flags=re.IGNORECASE,
         )
+
+    def rewrite_css_relative_query_urls(self, content: str) -> str:
+        """Fold ``?query`` into the filename for *relative* CSS ``url()`` refs.
+
+        The downloader saves ``foo.woff?v=4.2`` as ``foo__q<hash>.woff`` on
+        disk. The absolute-URL CSS pass handles cases like
+        ``url("https://host/foo.woff?v=4.2")``, but bare relative references
+        like ``url("fonts/foo.woff?v=4.2")`` are invisible to it and produce
+        font 404s. This pass rewrites just the query-bearing relative refs,
+        preserving the directory structure and only changing the filename.
+        """
+
+        def replace(match: re.Match) -> str:
+            prefix, url, suffix = match.group(1), match.group(2), match.group(3)
+            path_part, _, query_part = url.partition("?")
+            if not query_part:
+                return match.group(0)
+            folded = _apply_query_digest(path_part, query_part)
+            return f"{prefix}{folded}{suffix}"
+
+        return _CSS_RELATIVE_QUERY.sub(replace, content)
 
     def rewrite_json_escaped_urls(self, content: str, *, root_prefix: str = "./", collected_urls: list[str] | None = None) -> str:
         """Rewrite JSON-escaped URLs (``https:\\/\\/host\\/path``).
@@ -249,7 +374,11 @@ class LocalLinkRewriter:
 
         def replace(match: re.Match) -> str:
             unescaped_path = match.group(2).replace("\\/", "/")
-            local_path = self._local_path_for(unescaped_path, root_prefix)
+            # JSON-escaped URLs almost always live in script blocks where the
+            # value is used as a JS base URL — same as ``rewrite_js_urls``,
+            # we preserve the trailing slash and skip the ``/index.html``
+            # appendage.
+            local_path = self._local_path_for(unescaped_path, root_prefix, as_base_url=True)
             escaped_local_path = local_path.replace("/", "\\/")
             return f"{match.group(1)}{escaped_local_path}{match.group(3)}"
 
@@ -271,7 +400,7 @@ class LocalLinkRewriter:
             flags=re.IGNORECASE,
         )
 
-    def _local_path_for(self, path: str, root_prefix: str) -> str:
+    def _local_path_for(self, path: str, root_prefix: str, *, as_base_url: bool = False) -> str:
         """Swap the leading ``./`` from ``normalize_path_for_local`` for the file's actual depth-relative prefix.
 
         ``normalize_path_for_local`` always returns ``./xxx`` (treating the
@@ -279,30 +408,44 @@ class LocalLinkRewriter:
         subdirectories, the browser resolves ``./xxx`` against the file's own
         directory, which produces a wrong path. We substitute the right number
         of ``../`` hops here so the resolved URL actually points at the
-        downloaded file.
+        downloaded file. See ``normalize_path_for_local`` for ``as_base_url``.
         """
 
-        local = self.normalize_path_for_local(path)
+        local = self.normalize_path_for_local(path, as_base_url=as_base_url)
         if local.startswith("./"):
             return root_prefix + local[2:]
         return local
 
-    def normalize_path_for_local(self, path: str) -> str:
+    def normalize_path_for_local(self, path: str, *, as_base_url: bool = False) -> str:
         """Convert an archived absolute path into the downloaded local path.
 
-        Query strings are not discarded. They are folded into the filename using
-        the same ``__q<digest>`` convention that the downloader uses on disk, so
+        Query strings are folded into the filename using the same
+        ``__q<digest>`` convention that the downloader uses on disk, so
         rewritten references still point at the saved file.
+
+        Pass ``as_base_url=True`` when the path is being used as a JS base
+        URL (the most common case for JSON-embedded URLs and string literals
+        used in ``base + "subpath"`` patterns). In that mode we preserve a
+        trailing slash and skip the ``/index.html`` appendage so
+        concatenation produces a valid URL — without this the WordPress
+        REST endpoint ``"/wp-json/"`` would become ``"./wp-json/index.html"``
+        and ``endpoint + "wp/v2/users/me"`` would produce
+        ``"./wp-json/index.htmlwp/v2/users/me"``.
         """
 
         if not path or path == "/":
-            return "./index.html"
+            return "./" if as_base_url else "./index.html"
 
         normalized_tail = sanitize_reference_path(path, filesystem_safe=os_name == "nt")
         if not normalized_tail:
-            return "./index.html"
+            return "./" if as_base_url else "./index.html"
 
         relative_path = f"./{normalized_tail}"
+        if as_base_url:
+            if path.endswith("/") and not relative_path.endswith("/"):
+                relative_path += "/"
+            return relative_path
+
         extension = Path(normalized_tail).suffix.lower()
         if extension in self.SERVER_SIDE_EXTS:
             return relative_path

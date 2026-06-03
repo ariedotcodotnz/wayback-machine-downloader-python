@@ -225,6 +225,190 @@ class RewriteTests(unittest.TestCase):
             self.assertNotIn('href="./wp-includes/', content)
             self.assertNotIn('src="./wp-includes/', content)
 
+    def test_js_string_with_trailing_slash_preserves_base_url_shape(self) -> None:
+        # Regression: a JS object had ``endpoint: "https://host/wp-json/"`` —
+        # used as a base for WordPress REST concatenation. The rewriter
+        # previously turned the trailing slash into ``/index.html``, so
+        # ``endpoint + "wp/v2/users/me"`` produced
+        # ``"./wp-json/index.htmlwp/v2/users/me"`` — broken. The fix
+        # preserves the trailing slash in JS-context rewrites so
+        # concatenation still produces a valid URL.
+        rewriter = LocalLinkRewriter()
+        js = '{"endpoint":"https://voteforit.nz/wp-json/"}'
+        rewritten = rewriter.rewrite_js_urls(js)
+        self.assertIn('"endpoint":"./wp-json/"', rewritten)
+        self.assertNotIn("index.html", rewritten)
+
+    def test_json_escaped_trailing_slash_preserves_base_url_shape(self) -> None:
+        # Same as above but for JSON-escaped script-block configs (the form
+        # WordPress's inline settings most often use).
+        rewriter = LocalLinkRewriter()
+        content = '"endpoint":"https:\\/\\/voteforit.nz\\/wp-json\\/"'
+        rewritten = rewriter.rewrite_json_escaped_urls(content)
+        self.assertIn('"endpoint":".\\/wp-json\\/"', rewritten)
+        self.assertNotIn("index.html", rewritten)
+
+    def test_html_attribute_trailing_slash_still_becomes_index_html(self) -> None:
+        # Counter-test: the JS fix must NOT bleed into HTML attribute
+        # rewriting. ``<a href="https://host/about/">`` should still rewrite
+        # to ``./about/index.html`` (because the browser navigates to that
+        # URL as a document, not as a base for concatenation).
+        rewriter = LocalLinkRewriter()
+        html = '<a href="https://voteforit.nz/about/">About</a>'
+        rewritten = rewriter.rewrite_html_attribute_urls(html)
+        self.assertIn('href="./about/index.html"', rewritten)
+
+    def test_css_relative_url_with_query_is_folded_to_disk_filename(self) -> None:
+        # Regression: CSS files like ``font-awesome-legacy.min.css`` contain
+        # references like ``url("fonts/fontawesome-webfont.woff?v=4.2")``.
+        # The downloader saves the file as ``fontawesome-webfont__q<hash>.woff``
+        # (query folded into filename), but the relative reference was left
+        # untouched by the rewriter, so the browser asked for the literal
+        # ``?v=4.2`` URL and 404'd. This pass folds the query into the
+        # filename so the on-disk path is what the browser asks for.
+        rewriter = LocalLinkRewriter()
+        css = '@font-face { src: url("fonts/fontawesome-webfont.woff?v=4.2") format("woff"); }'
+        rewritten = rewriter.rewrite_css_relative_query_urls(css)
+        # Reference no longer has the literal ``?v=4.2``…
+        self.assertNotIn("?v=4.2", rewritten)
+        # …and matches the ``__q<hash>`` folded form the downloader uses.
+        self.assertRegex(rewritten, r'url\("fonts/fontawesome-webfont__q[0-9a-f]{12}\.woff"\)')
+
+    def test_css_relative_query_does_not_corrupt_js_optional_chaining(self) -> None:
+        # Regression: case-insensitive ``url\(`` matched ``URL(`` inside
+        # identifiers like ``compareURL(``, and ``?.`` optional chaining
+        # satisfied the ``\?...`` shape. The pass then folded the JS
+        # expression into a ``__q<hash>`` filename — silently corrupting
+        # minified JS that used optional chaining. The fix requires the
+        # query to start with an alphanumeric character.
+        rewriter = LocalLinkRewriter()
+        js_with_optional_chaining = (
+            "_tpt.compareURL(SR7.M[e].imgList[t]?.old, i) && doThing(arr?.[0]?.value)"
+        )
+        rewritten = rewriter.rewrite_css_relative_query_urls(js_with_optional_chaining)
+        # Must be byte-for-byte unchanged.
+        self.assertEqual(rewritten, js_with_optional_chaining)
+
+    def test_css_url_quote_style_is_preserved_in_html_style_attribute(self) -> None:
+        # Regression: substituting ``url("path")`` (double quotes) inside an
+        # HTML ``style="..."`` attribute closes the outer attribute early,
+        # so ``<div style="background-image: url(https://host/foo.jpg)">``
+        # was corrupted into ``<div style="background-image: url("
+        # wp-content="" uploads="" 04="" foo.jpg")="">``. Preserve the
+        # original quote style (or absence of quotes) so the substitution
+        # doesn't break HTML attribute parsing.
+        rewriter = LocalLinkRewriter()
+        html = '<div style="background-image: url(https://voteforit.nz/img/bg.jpg)"></div>'
+        rewritten = rewriter.rewrite_css_urls(html)
+        # No inner quotes injected — the source had none.
+        self.assertIn('url(./img/bg.jpg)', rewritten)
+        self.assertNotIn('url("./img/bg.jpg")', rewritten)
+
+    def test_css_url_quote_style_preserves_single_quotes(self) -> None:
+        rewriter = LocalLinkRewriter()
+        css = "body { background: url('https://voteforit.nz/img/bg.jpg'); }"
+        rewritten = rewriter.rewrite_css_urls(css)
+        self.assertIn("url('./img/bg.jpg')", rewritten)
+
+    def test_css_url_quote_style_preserves_double_quotes_in_css(self) -> None:
+        # In a standalone CSS file (where the outer container isn't a
+        # double-quoted HTML attribute), double quotes are fine and must
+        # be preserved if that's what the source used.
+        rewriter = LocalLinkRewriter()
+        css = 'body { background: url("https://voteforit.nz/img/bg.jpg"); }'
+        rewritten = rewriter.rewrite_css_urls(css)
+        self.assertIn('url("./img/bg.jpg")', rewritten)
+
+    def test_css_pass_does_not_run_on_js_files(self) -> None:
+        # Defense in depth: CSS passes should be file-gated to .css and HTML-
+        # like files. Even with the regex-tightening above, running CSS
+        # rewrites on .js files is a recipe for collisions between
+        # JS syntax and CSS-shaped patterns. This test feeds a .js file
+        # containing both legitimate JS optional chaining AND text that
+        # would match CSS rewrites if the pass ran — only the JS passes
+        # should touch it.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            js_file = root / "sr7.js"
+            js_source = (
+                "var compareURL = function(a, b) { "
+                "return SR7.M[e].imgList[t]?.old === b; "
+                "};\n"
+                # A literal HTTPS URL in a JS string SHOULD be rewritten
+                # by the JS pass (which is still wired up for .js files).
+                "var endpoint = 'https://voteforit.nz/api/foo.json?v=1';"
+            )
+            js_file.write_text(js_source, encoding="utf-8")
+
+            rewriter = LocalLinkRewriter()
+            rewriter.rewrite_file(js_file, root)
+            after = js_file.read_text(encoding="utf-8")
+
+            # Optional chaining survives — CSS pass never ran.
+            self.assertIn("imgList[t]?.old", after)
+            # JS pass DID run — the URL got rewritten.
+            self.assertIn("./api/foo__q", after)
+
+    def test_css_absolute_url_with_query_unaffected_by_relative_pass(self) -> None:
+        # Counter-test: absolute URLs already go through the existing
+        # absolute-CSS pass (which calls _local_path_for / sanitize_reference_path),
+        # so the new relative pass must NOT match them — otherwise we'd
+        # double-fold and produce a broken filename. The negative lookahead
+        # in _CSS_RELATIVE_QUERY enforces this.
+        rewriter = LocalLinkRewriter()
+        css = '@font-face { src: url("https://example.com/foo.woff?v=1") format("woff"); }'
+        rewritten = rewriter.rewrite_css_relative_query_urls(css)
+        # Untouched: the absolute pass owns this URL.
+        self.assertEqual(rewritten, css)
+
+    def test_srcset_rewriter_splits_wordpress_responsive_images(self) -> None:
+        # Regression: a WordPress srcset value with width descriptors
+        # (``2000w``, ``768w``, etc.) used to be captured as one giant URL
+        # by the standard JS pass, producing bogus download requests like
+        # ``https://host/foo.jpg 2000w, https://host/foo-768w.jpg 768w``.
+        # The dedicated srcset pass must split on commas, rewrite each URL
+        # to a local path, and preserve the descriptors.
+        rewriter = LocalLinkRewriter()
+        html = (
+            '<img srcset="https://voteforit.nz/img/photo.jpg 2000w, '
+            'https://voteforit.nz/img/photo-768x500.jpg 768w, '
+            'https://voteforit.nz/img/photo-300x200.jpg 300w">'
+        )
+        collected: list[str] = []
+        rewritten = rewriter.rewrite_srcset_urls(html, collected_urls=collected)
+
+        # Each URL got rewritten independently and the descriptors survived.
+        self.assertIn("./img/photo.jpg 2000w", rewritten)
+        self.assertIn("./img/photo-768x500.jpg 768w", rewritten)
+        self.assertIn("./img/photo-300x200.jpg 300w", rewritten)
+        self.assertNotIn("voteforit.nz", rewritten)
+
+        # And the collected URLs are individual canonical URLs, not one blob.
+        self.assertEqual(
+            sorted(collected),
+            sorted([
+                "https://voteforit.nz/img/photo.jpg",
+                "https://voteforit.nz/img/photo-768x500.jpg",
+                "https://voteforit.nz/img/photo-300x200.jpg",
+            ]),
+        )
+
+    def test_page_requisites_extractor_splits_wordpress_srcset(self) -> None:
+        # The extractor's old heuristic only triggered on ` 1x` or ` 2w`.
+        # WordPress uses width descriptors like 300w, 768w, 1024w, 2000w —
+        # none of which matched, so the whole srcset value was returned as a
+        # single bogus asset URL.
+        html = (
+            '<img srcset="https://host/a.jpg 2000w, '
+            'https://host/b.jpg 1024w, '
+            'https://host/c.jpg 300w">'
+        )
+        assets = PageRequisitesExtractor.extract(html)
+        self.assertEqual(
+            assets,
+            ["https://host/a.jpg", "https://host/b.jpg", "https://host/c.jpg"],
+        )
+
     def test_host_regex_stops_at_quotes_and_whitespace(self) -> None:
         # Regression: with the old ``[^/]+`` host pattern, a closing quote
         # immediately after the host let the host class swallow the quote
@@ -378,6 +562,37 @@ class DownloaderTests(unittest.TestCase):
                 downloader._resolve_asset_timestamp("https://cdn.example.org/jquery.js", 20200101000000),
                 20200101000000,
             )
+
+    def test_cross_host_urls_are_skipped_by_default(self) -> None:
+        # Defending the crawl-bounding fix: by default, _queue_asset_for_url
+        # should ignore URLs from any host other than the target. Without
+        # this, the rewriter+page-requisites feedback loop expands into
+        # Facebook, X, CDN-hosted scripts, third-party widgets — all of
+        # which balloon the queue and produce 404s for assets that aren't
+        # archived under the same prefix.
+        import queue as queue_mod
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = DownloadConfig(target="https://example.com", directory=Path(temp_dir), max_retries=0)
+            downloader = WaybackDownloader(config, transport=FakeTransport({}))
+            job_queue: queue_mod.Queue = queue_mod.Queue()
+
+            downloader._queue_asset_for_url("https://cdn.example.org/jquery.js", 20240101000000, job_queue)
+            downloader._queue_asset_for_url("https://facebook.com/somepage", 20240101000000, job_queue)
+            downloader._queue_asset_for_url("https://example.com/local.js", 20240101000000, job_queue)
+
+            self.assertEqual(job_queue.qsize(), 1, "only the same-host URL should be queued")
+
+    def test_cross_host_urls_are_queued_when_flag_is_on(self) -> None:
+        import queue as queue_mod
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = DownloadConfig(target="https://example.com", directory=Path(temp_dir), cross_host=True, max_retries=0)
+            downloader = WaybackDownloader(config, transport=FakeTransport({}))
+            job_queue: queue_mod.Queue = queue_mod.Queue()
+
+            downloader._queue_asset_for_url("https://cdn.example.org/jquery.js", 20240101000000, job_queue)
+            downloader._queue_asset_for_url("https://example.com/local.js", 20240101000000, job_queue)
+
+            self.assertEqual(job_queue.qsize(), 2, "both hosts should be queued when cross_host=True")
 
     def test_rewriter_collected_urls_are_queued_for_download(self) -> None:
         # The HTML body contains a JSON-escaped script URL that the page-
