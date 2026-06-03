@@ -1,5 +1,9 @@
 # Wayback Machine Downloader
 
+[![CI](https://github.com/ariedotcodotnz/wayback-machine-downloader-python/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/ariedotcodotnz/wayback-machine-downloader-python/actions/workflows/ci.yml)
+[![Publish to TestPyPI](https://github.com/ariedotcodotnz/wayback-machine-downloader-python/actions/workflows/testpypi.yml/badge.svg)](https://github.com/ariedotcodotnz/wayback-machine-downloader-python/actions/workflows/testpypi.yml)
+[![Publish to PyPI](https://github.com/ariedotcodotnz/wayback-machine-downloader-python/actions/workflows/release.yml/badge.svg)](https://github.com/ariedotcodotnz/wayback-machine-downloader-python/actions/workflows/release.yml)
+
 A Python port of the original Ruby [`wayback-machine-downloader`](https://github.com/StrawberryMaster/wayback-machine-downloader), built for users who prefer a Python-based workflow for downloading archived websites from the Internet Archive Wayback Machine.
 
 This tool helps recover, mirror, and archive old websites from Wayback Machine snapshots. It is useful for digital preservation, website recovery, static site restoration, OSINT research, historical web analysis, and rebuilding sites that are no longer online.
@@ -187,6 +191,28 @@ does not contact the archive.
 - [Development and testing](https://github.com/ariedotcodotnz/wayback-machine-downloader-python/blob/master/docs/development.md)
 
 ## Publishing
+
+### GitHub Actions automation
+
+This repository includes GitHub Actions workflows for:
+
+- CI testing on push and pull request across Python 3.10-3.13, plus a Windows smoke job
+- building `sdist` and `wheel` artifacts on every CI run
+- manual publishing to TestPyPI
+- publishing to PyPI when a GitHub Release is published
+
+To use Trusted Publishing with the included workflows:
+
+1. Create GitHub environments named `testpypi` and `pypi`.
+2. In TestPyPI, register a trusted publisher for this repository using workflow file `testpypi.yml` and environment `testpypi`.
+3. In PyPI, register a trusted publisher for this repository using workflow file `release.yml` and environment `pypi`.
+
+After that:
+
+- run the `Publish to TestPyPI` workflow manually from the Actions tab to test uploads
+- publish a GitHub Release to trigger the `Publish to PyPI` workflow
+
+### Manual publishing
 
 Build and validate the distribution archives:
 
