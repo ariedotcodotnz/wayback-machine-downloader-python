@@ -193,13 +193,3 @@ python -m compileall wayback_downloader tests
 
 The tests use fake transports and temporary directories, so they do not depend
 on live access to `web.archive.org`.
-
-## Project Status
-
-This repository currently emphasizes correctness, maintainability, and
-offline-testable behavior. The main gap is live end-to-end verification
-against the Internet Archive from within the repository's automated tests.
-
-## License
-
-No license file is currently included in this Python rewrite repository.
