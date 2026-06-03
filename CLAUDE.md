@@ -92,6 +92,12 @@ Hardcoding `f'url("...")'` (double quotes) silently corrupts HTML `style="..."` 
 ### Relative CSS `url()` refs with queries need their own pass
 The downloader folds `?ver=4.2` into `__q<hash>` filename suffixes. The absolute-URL CSS pass handles `url("https://host/foo.woff?v=4.2")` via `sanitize_reference_path`, but bare relative refs (`url("fonts/foo.woff?v=4.2")`) skip the absolute pass entirely. `rewrite_css_relative_query_urls` is a small targeted pass that folds the query into the filename for relative refs only — guarded by a negative lookahead for `data:`/`https?:`/`//` so it doesn't double-fold absolute URLs.
 
+### The srcset attribute pattern catches CMS-specific lazy-load variants
+Plugins like WordPress's LazyLoad and Nectar invent their own attributes — `data-srcset`, `data-lazy-srcset`, `data-nectar-img-srcset`, etc. — that hold the same comma-separated `url descriptor` shape. `_SRCSET_ATTR` matches `(prefix-)?(srcset|imagesrcset)` so any current or future `data-*-srcset` variant is caught. Without this, an unknown variant slips past the srcset pass and the generic JS pattern grabs the whole comma-joined value as one URL, mangling it through `sanitize_reference_path`.
+
+### The JS path class excludes whitespace as a safety net
+The JS string-literal pattern uses `[^"'\s]*` (not `[^"']*`) for the URL path. Real URLs never contain unencoded whitespace, so excluding it costs nothing — but it prevents the JS pattern from slurping an entire quoted srcset-style value (`"url1 1x, url2 2x"`) as a single garbage URL if that value's attribute name slips past `_SRCSET_ATTR`. Defense in depth: even if the srcset whitelist misses a variant, the JS path class refuses to span across the space-separated descriptor.
+
 ### `srcset` values need a dedicated rewrite pass
 WordPress's responsive images emit `srcset="url1 2000w, url2 1024w, url3 300w"`. The standard JS URL pattern matches any quoted absolute-URL-looking string, so it'd capture the whole comma-joined value as one URL. Likewise, `PageRequisitesExtractor`'s old heuristic only checked for the literal strings ` 1x` and ` 2w` — missing every WordPress width descriptor. Fix: `LocalLinkRewriter.rewrite_srcset_urls` runs **first**, splits on commas, rewrites each URL with its descriptor preserved. `PageRequisitesExtractor._split_srcset` now accepts any `\d+(w|x)` descriptor.
 

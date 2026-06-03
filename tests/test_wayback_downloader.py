@@ -361,6 +361,57 @@ class RewriteTests(unittest.TestCase):
         # Untouched: the absolute pass owns this URL.
         self.assertEqual(rewritten, css)
 
+    def test_srcset_rewriter_matches_lazy_load_data_variants(self) -> None:
+        # Regression: Nectar's lazy-load attribute ``data-nectar-img-srcset``
+        # was not in the srcset attribute whitelist (which previously only
+        # had ``srcset|data-srcset|imagesrcset``). The fallback JS pattern
+        # then grabbed the entire value as one URL and mangled it through
+        # ``sanitize_reference_path``, producing output like
+        # ``https%3A/voteforit.nz/...`` for all URLs past the first.
+        rewriter = LocalLinkRewriter()
+        html = (
+            '<img data-nectar-img-srcset="'
+            'https://voteforit.nz/img/a.jpg 1024w, '
+            'https://voteforit.nz/img/b.jpg 768w, '
+            'https://voteforit.nz/img/c.jpg 300w">'
+        )
+        rewritten = rewriter.rewrite_srcset_urls(html)
+        # All three URLs got rewritten — no ``https%3A/`` corruption.
+        self.assertNotIn("https%3A", rewritten)
+        self.assertIn("./img/a.jpg 1024w", rewritten)
+        self.assertIn("./img/b.jpg 768w", rewritten)
+        self.assertIn("./img/c.jpg 300w", rewritten)
+
+    def test_srcset_rewriter_matches_arbitrary_data_prefix(self) -> None:
+        # Defense in depth: any CMS-invented data-*srcset variant should
+        # be caught by the broadened attribute pattern.
+        rewriter = LocalLinkRewriter()
+        # Real-world variants: WordPress core, popular lazy-load plugins,
+        # Nectar's theme-specific attribute, and HTML5's imagesrcset.
+        for attr in ("data-srcset", "data-lazy-srcset", "data-nectar-img-srcset",
+                     "data-some-plugins-image-srcset", "imagesrcset"):
+            html = f'<img {attr}="https://host/a.jpg 1x, https://host/b.jpg 2x">'
+            rewritten = rewriter.rewrite_srcset_urls(html)
+            self.assertNotIn("https://host", rewritten, msg=f"{attr} not rewritten")
+            self.assertIn("./a.jpg 1x", rewritten)
+            self.assertIn("./b.jpg 2x", rewritten)
+
+    def test_js_pattern_refuses_to_slurp_srcset_style_value(self) -> None:
+        # Regression: even if a srcset variant slips past the srcset pass,
+        # the standard JS pattern must not match a quoted srcset-style
+        # value (which has spaces between URL and descriptor). With the
+        # old ``[^"']*`` path class, the JS pattern would grab the whole
+        # value as one URL and mangle it. With the new ``[^"'\s]*`` class,
+        # the path stops at the first space and the overall pattern fails
+        # to match (no closing quote where expected).
+        rewriter = LocalLinkRewriter()
+        # Use an attribute the srcset pass doesn't know about, so we test
+        # the JS-pattern fallback in isolation.
+        content = 'data-mystery="https://voteforit.nz/a.jpg 1024w, https://voteforit.nz/b.jpg 768w"'
+        rewritten = rewriter.rewrite_js_urls(content)
+        # Untouched — neither URL was matched, no corruption.
+        self.assertEqual(rewritten, content)
+
     def test_srcset_rewriter_splits_wordpress_responsive_images(self) -> None:
         # Regression: a WordPress srcset value with width descriptors
         # (``2000w``, ``768w``, etc.) used to be captured as one giant URL

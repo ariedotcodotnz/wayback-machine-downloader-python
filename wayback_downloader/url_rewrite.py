@@ -39,11 +39,11 @@ _COLLECT_CSS_STD = re.compile(
     re.IGNORECASE,
 )
 _COLLECT_JS_WAYBACK = re.compile(
-    rf"""["']https?://web\.archive\.org/web/\d+(?:id_)?/(?:https?:)?//({_HOST})([^"']*)["']""",
+    rf"""["']https?://web\.archive\.org/web/\d+(?:id_)?/(?:https?:)?//({_HOST})([^"'\s]*)["']""",
     re.IGNORECASE,
 )
 _COLLECT_JS_STD = re.compile(
-    rf"""["'](?:https?:)?//({_HOST})([^"']*)["']""",
+    rf"""["'](?:https?:)?//({_HOST})([^"'\s]*)["']""",
     re.IGNORECASE,
 )
 _COLLECT_JSON_WAYBACK = re.compile(
@@ -329,15 +329,20 @@ class LocalLinkRewriter:
         if collected_urls is not None:
             _harvest(_COLLECT_JS_WAYBACK, content, collected_urls)
         content = re.sub(
-            rf"""(["'])https?://web\.archive\.org/web/\d+(?:id_)?/(?:https?:)?//{_HOST}([^"']*)(["'])""",
+            rf"""(["'])https?://web\.archive\.org/web/\d+(?:id_)?/(?:https?:)?//{_HOST}([^"'\s]*)(["'])""",
             lambda match: f"{match.group(1)}{self._local_path_for(match.group(2), root_prefix, as_base_url=True)}{match.group(3)}",
             content,
             flags=re.IGNORECASE,
         )
         if collected_urls is not None:
             _harvest(_COLLECT_JS_STD, content, collected_urls)
+        # Path class excludes whitespace so a quoted srcset-style value
+        # (``"url1 1x, url2 2x"``) can't be slurped as a single URL by the
+        # generic JS pattern. Real URLs never contain unencoded whitespace,
+        # so this only excludes broken inputs and srcset-style values that
+        # should be handled by ``rewrite_srcset_urls`` instead.
         return re.sub(
-            rf"""(["'])(?:https?:)?//{_HOST}([^"']*)(["'])""",
+            rf"""(["'])(?:https?:)?//{_HOST}([^"'\s]*)(["'])""",
             lambda match: f"{match.group(1)}{self._local_path_for(match.group(2), root_prefix, as_base_url=True)}{match.group(3)}",
             content,
             flags=re.IGNORECASE,
