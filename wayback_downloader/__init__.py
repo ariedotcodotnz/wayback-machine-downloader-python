@@ -1,4 +1,4 @@
-from .config import DownloadConfig
+ from .config import DownloadConfig
 from .downloader import WaybackDownloader
 
 __all__ = ["DownloadConfig", "WaybackDownloader"]

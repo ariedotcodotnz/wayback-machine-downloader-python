@@ -55,12 +55,16 @@ _COLLECT_JSON_STD = re.compile(
     re.IGNORECASE,
 )
 
-# Matches the entire value of a ``srcset`` attribute so we can split it on
-# commas and rewrite each URL individually. Must run before the standard JS
-# pass, which would otherwise capture the whole comma-joined value as a single
-# garbage URL.
+# Matches the entire value of any *srcset attribute so we can split it on
+# commas and rewrite each URL individually. The attribute name is
+# ``(prefix-)?(srcset|imagesrcset)`` — covering plain ``srcset``, HTML5's
+# ``imagesrcset``, and CMS-specific lazy-load variants like WordPress's
+# ``data-srcset`` and Nectar's ``data-nectar-img-srcset``. Without this
+# breadth, an unknown variant slips through and the standard JS pattern
+# grabs the entire comma-joined value as one URL, mangling everything past
+# the first space when it runs through ``sanitize_reference_path``.
 _SRCSET_ATTR = re.compile(
-    r"""(\s(?:srcset|data-srcset|imagesrcset)\s*=\s*["'])([^"']+)(["'])""",
+    r"""(\s(?:[a-z][a-z0-9-]*-)?(?:srcset|imagesrcset)\s*=\s*["'])([^"']+)(["'])""",
     re.IGNORECASE,
 )
 _SRCSET_DESCRIPTOR = re.compile(r"^\d+(?:\.\d+)?[wx]$", re.IGNORECASE)
