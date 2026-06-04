@@ -40,5 +40,5 @@ Issues = "https://github.com/ariedotcodotnz/wayback-machine-downloader-python/is
 [project.scripts]
 wayback-machine-downloader = "wayback_downloader.cli:main"
 
-[tool.setuptools]
-packages = ["wayback_downloader"]
+[tool.setuptools.packages.find]
+include = ["wayback_downloader*"]

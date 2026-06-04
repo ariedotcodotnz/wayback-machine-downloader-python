@@ -50,37 +50,12 @@ def build_config(args: argparse.Namespace) -> DownloadConfig:
     """Translate parsed CLI arguments into the typed runtime config."""
 
     if args.local_only:
-        if not args.target:
-            raise SystemExit("A directory is required when using --local-only.")
-        directory = Path(args.target).expanduser().resolve()
-        if not directory.exists():
-            raise SystemExit(f"Directory does not exist: {directory}")
+        directory = _resolve_local_directory(args.target)
         return DownloadConfig(
             target=args.target,
             directory=directory,
-            all_timestamps=args.all_timestamps,
-            from_timestamp=args.from_timestamp,
-            to_timestamp=args.to_timestamp,
-            exact_url=args.exact_url,
-            only_filter=args.only_filter,
-            exclude_filter=args.exclude_filter,
-            include_all_responses=args.include_all_responses,
-            keep_duplicates=args.keep_duplicates,
-            maximum_pages=args.maximum_pages,
-            concurrency=args.concurrency,
-            list_only=args.list_only,
-            rewritten=args.rewritten,
-            rewrite_to_local=args.rewrite_to_local,
             local_only=True,
-            reset=args.reset,
-            keep_state=args.keep_state,
-            max_retries=args.max_retries,
-            snapshot_at=args.snapshot_at,
-            recursive_subdomains=args.recursive_subdomains,
-            subdomain_depth=args.subdomain_depth,
-            page_requisites=args.page_requisites,
-            cross_host=args.cross_host,
-            timeout=args.timeout,
+            **_shared_config_options(args),
         )
 
     if not args.target:
@@ -89,30 +64,45 @@ def build_config(args: argparse.Namespace) -> DownloadConfig:
     return DownloadConfig(
         target=args.target,
         directory=args.directory,
-        all_timestamps=args.all_timestamps,
-        from_timestamp=args.from_timestamp,
-        to_timestamp=args.to_timestamp,
-        exact_url=args.exact_url,
-        only_filter=args.only_filter,
-        exclude_filter=args.exclude_filter,
-        include_all_responses=args.include_all_responses,
-        keep_duplicates=args.keep_duplicates,
-        maximum_pages=args.maximum_pages,
-        concurrency=args.concurrency,
-        list_only=args.list_only,
-        rewritten=args.rewritten,
-        rewrite_to_local=args.rewrite_to_local,
         local_only=False,
-        reset=args.reset,
-        keep_state=args.keep_state,
-        max_retries=args.max_retries,
-        snapshot_at=args.snapshot_at,
-        recursive_subdomains=args.recursive_subdomains,
-        subdomain_depth=args.subdomain_depth,
-        page_requisites=args.page_requisites,
-        cross_host=args.cross_host,
-        timeout=args.timeout,
+        **_shared_config_options(args),
     )
+
+
+def _resolve_local_directory(raw_target: str | None) -> Path:
+    if not raw_target:
+        raise SystemExit("A directory is required when using --local-only.")
+    directory = Path(raw_target).expanduser().resolve()
+    if not directory.exists():
+        raise SystemExit(f"Directory does not exist: {directory}")
+    return directory
+
+
+def _shared_config_options(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        "all_timestamps": args.all_timestamps,
+        "from_timestamp": args.from_timestamp,
+        "to_timestamp": args.to_timestamp,
+        "exact_url": args.exact_url,
+        "only_filter": args.only_filter,
+        "exclude_filter": args.exclude_filter,
+        "include_all_responses": args.include_all_responses,
+        "keep_duplicates": args.keep_duplicates,
+        "maximum_pages": args.maximum_pages,
+        "concurrency": args.concurrency,
+        "list_only": args.list_only,
+        "rewritten": args.rewritten,
+        "rewrite_to_local": args.rewrite_to_local,
+        "reset": args.reset,
+        "keep_state": args.keep_state,
+        "max_retries": args.max_retries,
+        "snapshot_at": args.snapshot_at,
+        "recursive_subdomains": args.recursive_subdomains,
+        "subdomain_depth": args.subdomain_depth,
+        "page_requisites": args.page_requisites,
+        "cross_host": args.cross_host,
+        "timeout": args.timeout,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:

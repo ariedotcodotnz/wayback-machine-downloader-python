@@ -8,6 +8,11 @@ from unittest.mock import Mock, patch
 from wayback_downloader.archive import ArchiveClient
 from wayback_downloader.cli import build_config, build_parser
 from wayback_downloader.config import DownloadConfig
+from wayback_downloader.download import (
+    AssetSnapshotIndex,
+    AssetSnapshotPlanner,
+    SnapshotDownloadQueue,
+)
 from wayback_downloader.downloader import WaybackDownloader
 from wayback_downloader.filters import URLFilter
 from wayback_downloader.models import FetchDisposition, FetchResult, HTTPResponse, Snapshot
@@ -71,6 +76,74 @@ class SnapshotPlannerTests(unittest.TestCase):
         mapper = LocalPathMapper(Path("unused"))
         sanitized = mapper.sanitize_file_id("search?q=test", "http://example.com/search?q=test")
         self.assertIn("__q", sanitized)
+
+
+class AssetSnapshotIndexTests(unittest.TestCase):
+    def test_resolves_nearest_timestamp_without_scheme_sensitivity(self) -> None:
+        index = AssetSnapshotIndex.from_raw_snapshots(
+            [
+                (20200101000000, "http://example.com/logo.png"),
+                (20220101000000, "https://example.com/logo.png"),
+            ]
+        )
+
+        self.assertEqual(index.resolve("https://example.com/logo.png", 20210101000000), 20200101000000)
+        self.assertEqual(index.resolve("http://example.com/logo.png", 20190101000000), 20220101000000)
+
+
+class AssetSnapshotPlannerTests(unittest.TestCase):
+    def test_cross_host_assets_are_rejected_by_default(self) -> None:
+        planner = AssetSnapshotPlanner(
+            DownloadConfig(target="https://example.com"),
+            LocalPathMapper(Path("unused")),
+        )
+
+        self.assertIsNone(planner.snapshot_for_url("https://cdn.example.org/app.js", 20200101000000))
+        same_host = planner.snapshot_for_url("https://example.com/app.js?v=1", 20200101000000)
+
+        self.assertIsNotNone(same_host)
+        assert same_host is not None
+        self.assertEqual(same_host.original_url, "https://example.com/app.js?v=1")
+        self.assertIn("__q", same_host.file_id)
+
+    def test_discover_from_html_preserves_wayback_embedded_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            html = root / "index.html"
+            html.write_text(
+                '<img src="/web/20210101000000id_/https://example.com/assets/logo.png">',
+                encoding="utf-8",
+            )
+            planner = AssetSnapshotPlanner(
+                DownloadConfig(target="https://example.com"),
+                LocalPathMapper(root),
+            )
+
+            snapshots = planner.discover_from_html(
+                html,
+                Snapshot("http://example.com/index.html", 20200101000000, "index.html"),
+            )
+
+            self.assertEqual(len(snapshots), 1)
+            self.assertEqual(snapshots[0].timestamp, 20210101000000)
+            self.assertEqual(snapshots[0].file_id, "assets/logo.png")
+
+
+class SnapshotDownloadQueueTests(unittest.TestCase):
+    def test_worker_added_jobs_are_processed_before_shutdown(self) -> None:
+        processed: list[str] = []
+
+        def processor(snapshot: Snapshot, jobs) -> bool:
+            processed.append(snapshot.file_id)
+            if snapshot.file_id == "index.html":
+                jobs.put(Snapshot("https://example.com/app.js", 1, "app.js"))
+            return False
+
+        SnapshotDownloadQueue(worker_count=1, rate_limit=0, processor=processor).run(
+            [Snapshot("https://example.com/index.html", 1, "index.html")]
+        )
+
+        self.assertEqual(processed, ["index.html", "app.js"])
 
 
 class ArchiveClientTests(unittest.TestCase):
