@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.parse import urlsplit
 from unittest.mock import Mock, patch
 
 from wayback_downloader.archive import ArchiveClient
@@ -568,8 +569,8 @@ class RewriteTests(unittest.TestCase):
             self.assertNotIn("<", url, msg=f"stray angle bracket in {url!r}")
 
         # And the two real URLs are still captured.
-        self.assertTrue(any("googletagmanager.com" in url for url in collected))
-        self.assertTrue(any("fonts.gstatic.com" in url for url in collected))
+        self.assertTrue(any(urlsplit(url).hostname == "www.googletagmanager.com" for url in collected))
+        self.assertTrue(any(urlsplit(url).hostname == "fonts.gstatic.com" for url in collected))
 
     def test_directory_style_url_resolves_to_directory_index(self) -> None:
         # Regression: a trailing slash used to be sanitized into an empty
